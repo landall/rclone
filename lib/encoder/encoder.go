@@ -2,7 +2,7 @@
 Translate file names for usage on restrictive storage systems
 
 The restricted set of characters are mapped to a unicode equivalent version
-(most to their FULLWIDTH variant) to increase compatability with other
+(most to their FULLWIDTH variant) to increase compatibility with other
 storage systems.
 See: http://unicode-search.net/unicode-namesearch.pl?term=FULLWIDTH
 
@@ -63,6 +63,8 @@ const (
 	EncodeRightCrLfHtVt                          // Trailing CR LF HT VT
 	EncodeInvalidUtf8                            // Invalid UTF-8 bytes
 	EncodeDot                                    // . and .. names
+	EncodeSquareBracket                          // []
+	EncodeSemicolon                              // ;
 
 	// Synthetic
 	EncodeWin         = EncodeColon | EncodeQuestion | EncodeDoubleQuote | EncodeAsterisk | EncodeLtGt | EncodePipe // :?"*<>|
@@ -120,6 +122,8 @@ func init() {
 	alias("None", EncodeZero)
 	alias("Slash", EncodeSlash)
 	alias("LtGt", EncodeLtGt)
+	alias("SquareBracket", EncodeSquareBracket)
+	alias("Semicolon", EncodeSemicolon)
 	alias("DoubleQuote", EncodeDoubleQuote)
 	alias("SingleQuote", EncodeSingleQuote)
 	alias("BackQuote", EncodeBackQuote)
@@ -195,7 +199,7 @@ func (mask *MultiEncoder) Set(in string) error {
 	return nil
 }
 
-// Type returns a textual type of the MultiEncoder to satsify the pflag.Value interface
+// Type returns a textual type of the MultiEncoder to satisfy the pflag.Value interface
 func (mask MultiEncoder) Type() string {
 	return "Encoding"
 }
@@ -312,6 +316,19 @@ func (mask MultiEncoder) Encode(in string) string {
 				switch r {
 				case '<', '>',
 					'＜', '＞':
+					return true
+				}
+			}
+			if mask.Has(EncodeSquareBracket) { // []
+				switch r {
+				case '[', ']',
+					'［', '］':
+					return true
+				}
+			}
+			if mask.Has(EncodeSemicolon) { // ;
+				switch r {
+				case ';', '；':
 					return true
 				}
 			}
@@ -468,6 +485,28 @@ func (mask MultiEncoder) Encode(in string) string {
 				out.WriteRune(r + fullOffset)
 				continue
 			case '＜', '＞':
+				out.WriteRune(QuoteRune)
+				out.WriteRune(r)
+				continue
+			}
+		}
+		if mask.Has(EncodeSquareBracket) { // []
+			switch r {
+			case '[', ']':
+				out.WriteRune(r + fullOffset)
+				continue
+			case '［', '］':
+				out.WriteRune(QuoteRune)
+				out.WriteRune(r)
+				continue
+			}
+		}
+		if mask.Has(EncodeSemicolon) { // ;
+			switch r {
+			case ';':
+				out.WriteRune(r + fullOffset)
+				continue
+			case '；':
 				out.WriteRune(QuoteRune)
 				out.WriteRune(r)
 				continue
@@ -713,6 +752,19 @@ func (mask MultiEncoder) Decode(in string) string {
 					return true
 				}
 			}
+			if mask.Has(EncodeSquareBracket) { // []
+				switch r {
+				case '［', '］':
+					return true
+				}
+			}
+			if mask.Has(EncodeSemicolon) { // ;
+				switch r {
+				case '；':
+					return true
+				}
+			}
+
 			if mask.Has(EncodeQuestion) { // ?
 				switch r {
 				case '？':
@@ -849,6 +901,28 @@ func (mask MultiEncoder) Decode(in string) string {
 		if mask.Has(EncodeLtGt) { // <>
 			switch r {
 			case '＜', '＞':
+				if unquote {
+					out.WriteRune(r)
+				} else {
+					out.WriteRune(r - fullOffset)
+				}
+				continue
+			}
+		}
+		if mask.Has(EncodeSquareBracket) { // []
+			switch r {
+			case '［', '］':
+				if unquote {
+					out.WriteRune(r)
+				} else {
+					out.WriteRune(r - fullOffset)
+				}
+				continue
+			}
+		}
+		if mask.Has(EncodeSemicolon) { // ;
+			switch r {
+			case '；':
 				if unquote {
 					out.WriteRune(r)
 				} else {
@@ -1095,7 +1169,7 @@ func (i identity) ToStandardName(s string) string {
 	return ToStandardName(i, s)
 }
 
-// Identity returns a Encoder that always returns the input value
+// Identity returns an Encoder that always returns the input value
 func Identity() Encoder {
 	return identity{}
 }

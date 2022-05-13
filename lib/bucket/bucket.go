@@ -1,4 +1,4 @@
-// Package bucket is contains utilities for managing bucket based backends
+// Package bucket is contains utilities for managing bucket-based backends
 package bucket
 
 import (
@@ -88,7 +88,7 @@ func (c *Cache) Create(bucket string, create CreateFn, exists ExistsFn) (err err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// if have exists fuction and bucket has been deleted, check
+	// if have exists function and bucket has been deleted, check
 	// it still exists
 	if created, ok := c.status[bucket]; ok && !created && exists != nil {
 		found, err := exists()

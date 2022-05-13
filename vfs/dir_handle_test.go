@@ -6,15 +6,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rclone/rclone/fstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestDirHandleMethods(t *testing.T) {
-	r := fstest.NewRun(t)
-	defer r.Finalise()
-	_, dir, _ := dirCreate(t, r)
+	_, _, dir, _, cleanup := dirCreate(t)
+	defer cleanup()
 
 	h, err := dir.Open(os.O_RDONLY)
 	require.NoError(t, err)
@@ -40,14 +38,13 @@ func TestDirHandleMethods(t *testing.T) {
 }
 
 func TestDirHandleReaddir(t *testing.T) {
-	r := fstest.NewRun(t)
-	defer r.Finalise()
-	vfs := New(r.Fremote, nil)
+	r, vfs, cleanup := newTestVFS(t)
+	defer cleanup()
 
 	file1 := r.WriteObject(context.Background(), "dir/file1", "file1 contents", t1)
 	file2 := r.WriteObject(context.Background(), "dir/file2", "file2- contents", t2)
 	file3 := r.WriteObject(context.Background(), "dir/subdir/file3", "file3-- contents", t3)
-	fstest.CheckItems(t, r.Fremote, file1, file2, file3)
+	r.CheckRemoteItems(t, file1, file2, file3)
 
 	node, err := vfs.Stat("dir")
 	require.NoError(t, err)
@@ -96,9 +93,8 @@ func TestDirHandleReaddir(t *testing.T) {
 }
 
 func TestDirHandleReaddirnames(t *testing.T) {
-	r := fstest.NewRun(t)
-	defer r.Finalise()
-	_, dir, _ := dirCreate(t, r)
+	_, _, dir, _, cleanup := dirCreate(t)
+	defer cleanup()
 
 	fh, err := dir.Open(os.O_RDONLY)
 	require.NoError(t, err)

@@ -2,9 +2,15 @@ package operations
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"path"
 	"strings"
+	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/rc"
 )
@@ -15,18 +21,22 @@ func init() {
 		AuthRequired: true,
 		Fn:           rcList,
 		Title:        "List the given remote and path in JSON format",
-		Help: `This takes the following parameters
+		Help: `This takes the following parameters:
 
-- fs - a remote name string eg "drive:"
-- remote - a path within that remote eg "dir"
+- fs - a remote name string e.g. "drive:"
+- remote - a path within that remote e.g. "dir"
 - opt - a dictionary of options to control the listing (optional)
     - recurse - If set recurse directories
     - noModTime - If set return modification time
     - showEncrypted -  If set show decrypted names
     - showOrigIDs - If set show the IDs for each item if known
     - showHash - If set return a dictionary of hashes
+    - noMimeType - If set don't show mime types
+    - dirsOnly - If set only show directories
+    - filesOnly - If set only show files
+    - hashTypes - array of strings of hash types to show if showHash set
 
-The result is
+Returns:
 
 - list
     - This is an array of objects as described in the lsjson command
@@ -38,7 +48,7 @@ See the [lsjson command](/commands/rclone_lsjson/) for more information on the a
 
 // List the directory
 func rcList(ctx context.Context, in rc.Params) (out rc.Params, err error) {
-	f, remote, err := rc.GetFsAndRemote(in)
+	f, remote, err := rc.GetFsAndRemote(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +72,58 @@ func rcList(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
+		Path:         "operations/stat",
+		AuthRequired: true,
+		Fn:           rcStat,
+		Title:        "Give information about the supplied file or directory",
+		Help: `This takes the following parameters
+
+- fs - a remote name string eg "drive:"
+- remote - a path within that remote eg "dir"
+- opt - a dictionary of options to control the listing (optional)
+    - see operations/list for the options
+
+The result is
+
+- item - an object as described in the lsjson command. Will be null if not found.
+
+Note that if you are only interested in files then it is much more
+efficient to set the filesOnly flag in the options.
+
+See the [lsjson command](/commands/rclone_lsjson/) for more information on the above and examples.
+`,
+	})
+}
+
+// List the directory
+func rcStat(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	f, remote, err := rc.GetFsAndRemote(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	var opt ListJSONOpt
+	err = in.GetStruct("opt", &opt)
+	if rc.NotErrParamNotFound(err) {
+		return nil, err
+	}
+	item, err := StatJSON(ctx, f, remote, &opt)
+	if err != nil {
+		return nil, err
+	}
+	out = make(rc.Params)
+	out["item"] = item
+	return out, nil
+}
+
+func init() {
+	rc.Add(rc.Call{
 		Path:         "operations/about",
 		AuthRequired: true,
 		Fn:           rcAbout,
 		Title:        "Return the space used on the remote",
-		Help: `This takes the following parameters
+		Help: `This takes the following parameters:
 
-- fs - a remote name string eg "drive:"
+- fs - a remote name string e.g. "drive:"
 
 The result is as returned from rclone about --json
 
@@ -79,21 +134,21 @@ See the [about command](/commands/rclone_size/) command for more information on 
 
 // About the remote
 func rcAbout(ctx context.Context, in rc.Params) (out rc.Params, err error) {
-	f, err := rc.GetFs(in)
+	f, err := rc.GetFs(ctx, in)
 	if err != nil {
 		return nil, err
 	}
 	doAbout := f.Features().About
 	if doAbout == nil {
-		return nil, errors.Errorf("%v doesn't support about", f)
+		return nil, fmt.Errorf("%v doesn't support about", f)
 	}
 	u, err := doAbout(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "about call failed")
+		return nil, fmt.Errorf("about call failed: %w", err)
 	}
 	err = rc.Reshape(&out, u)
 	if err != nil {
-		return nil, errors.Wrap(err, "about Reshape failed")
+		return nil, fmt.Errorf("about Reshape failed: %w", err)
 	}
 	return out, nil
 }
@@ -112,12 +167,12 @@ func init() {
 				return rcMoveOrCopyFile(ctx, in, copy)
 			},
 			Title: name + " a file from source remote to destination remote",
-			Help: `This takes the following parameters
+			Help: `This takes the following parameters:
 
-- srcFs - a remote name string eg "drive:" for the source
-- srcRemote - a path within that remote eg "file.txt" for the source
-- dstFs - a remote name string eg "drive2:" for the destination
-- dstRemote - a path within that remote eg "file2.txt" for the destination
+- srcFs - a remote name string e.g. "drive:" for the source
+- srcRemote - a path within that remote e.g. "file.txt" for the source
+- dstFs - a remote name string e.g. "drive2:" for the destination
+- dstRemote - a path within that remote e.g. "file2.txt" for the destination
 `,
 		})
 	}
@@ -125,11 +180,11 @@ func init() {
 
 // Copy a file
 func rcMoveOrCopyFile(ctx context.Context, in rc.Params, cp bool) (out rc.Params, err error) {
-	srcFs, srcRemote, err := rc.GetFsAndRemoteNamed(in, "srcFs", "srcRemote")
+	srcFs, srcRemote, err := rc.GetFsAndRemoteNamed(ctx, in, "srcFs", "srcRemote")
 	if err != nil {
 		return nil, err
 	}
-	dstFs, dstRemote, err := rc.GetFsAndRemoteNamed(in, "dstFs", "dstRemote")
+	dstFs, dstRemote, err := rc.GetFsAndRemoteNamed(ctx, in, "dstFs", "dstRemote")
 	if err != nil {
 		return nil, err
 	}
@@ -138,35 +193,38 @@ func rcMoveOrCopyFile(ctx context.Context, in rc.Params, cp bool) (out rc.Params
 
 func init() {
 	for _, op := range []struct {
-		name     string
-		title    string
-		help     string
-		noRemote bool
+		name         string
+		title        string
+		help         string
+		noRemote     bool
+		needsRequest bool
 	}{
 		{name: "mkdir", title: "Make a destination directory or container"},
 		{name: "rmdir", title: "Remove an empty directory or container"},
 		{name: "purge", title: "Remove a directory or container and all of its contents"},
-		{name: "rmdirs", title: "Remove all the empty directories in the path", help: "- leaveRoot - boolean, set to true not to delete the root\n"},
+		{name: "rmdirs", title: "Remove all the empty directories in the path", help: "- leaveRoot - boolean, set to true not to delete the root"},
 		{name: "delete", title: "Remove files in the path", noRemote: true},
 		{name: "deletefile", title: "Remove the single file pointed to"},
 		{name: "copyurl", title: "Copy the URL to the object", help: "- url - string, URL to read from\n - autoFilename - boolean, set to true to retrieve destination file name from url"},
+		{name: "uploadfile", title: "Upload file using multiform/form-data", help: "- each part in body represents a file to be uploaded", needsRequest: true},
 		{name: "cleanup", title: "Remove trashed files in the remote or path", noRemote: true},
 	} {
 		op := op
-		remote := "- remote - a path within that remote eg \"dir\"\n"
+		remote := "- remote - a path within that remote e.g. \"dir\"\n"
 		if op.noRemote {
 			remote = ""
 		}
 		rc.Add(rc.Call{
 			Path:         "operations/" + op.name,
 			AuthRequired: true,
+			NeedsRequest: op.needsRequest,
 			Fn: func(ctx context.Context, in rc.Params) (rc.Params, error) {
 				return rcSingleCommand(ctx, in, op.name, op.noRemote)
 			},
 			Title: op.title,
-			Help: `This takes the following parameters
+			Help: `This takes the following parameters:
 
-- fs - a remote name string eg "drive:"
+- fs - a remote name string e.g. "drive:"
 ` + remote + op.help + `
 See the [` + op.name + ` command](/commands/rclone_` + op.name + `/) command for more information on the above.
 `,
@@ -174,16 +232,16 @@ See the [` + op.name + ` command](/commands/rclone_` + op.name + `/) command for
 	}
 }
 
-// Run a single command, eg Mkdir
+// Run a single command, e.g. Mkdir
 func rcSingleCommand(ctx context.Context, in rc.Params, name string, noRemote bool) (out rc.Params, err error) {
 	var (
 		f      fs.Fs
 		remote string
 	)
 	if noRemote {
-		f, err = rc.GetFs(in)
+		f, err = rc.GetFs(ctx, in)
 	} else {
-		f, remote, err = rc.GetFsAndRemote(in)
+		f, remote, err = rc.GetFsAndRemote(ctx, in)
 	}
 	if err != nil {
 		return nil, err
@@ -215,9 +273,45 @@ func rcSingleCommand(ctx context.Context, in rc.Params, name string, noRemote bo
 			return nil, err
 		}
 		autoFilename, _ := in.GetBool("autoFilename")
+		noClobber, _ := in.GetBool("noClobber")
 
-		_, err = CopyURL(ctx, f, remote, url, autoFilename)
+		_, err = CopyURL(ctx, f, remote, url, autoFilename, noClobber)
 		return nil, err
+	case "uploadfile":
+
+		var request *http.Request
+		request, err := in.GetHTTPRequest()
+
+		if err != nil {
+			return nil, err
+		}
+
+		contentType := request.Header.Get("Content-Type")
+		mediaType, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return nil, err
+		}
+
+		if strings.HasPrefix(mediaType, "multipart/") {
+			mr := multipart.NewReader(request.Body, params["boundary"])
+			for {
+				p, err := mr.NextPart()
+				if err == io.EOF {
+					return nil, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				if p.FileName() != "" {
+					obj, err := Rcat(ctx, f, path.Join(remote, p.FileName()), p, time.Now())
+					if err != nil {
+						return nil, err
+					}
+					fs.Debugf(obj, "Upload Succeeded")
+				}
+			}
+		}
+		return nil, nil
 	case "cleanup":
 		return nil, CleanUp(ctx, f)
 	}
@@ -230,11 +324,11 @@ func init() {
 		AuthRequired: true,
 		Fn:           rcSize,
 		Title:        "Count the number of bytes and files in remote",
-		Help: `This takes the following parameters
+		Help: `This takes the following parameters:
 
-- fs - a remote name string eg "drive:path/to/dir"
+- fs - a remote name string e.g. "drive:path/to/dir"
 
-Returns
+Returns:
 
 - count - number of files
 - bytes - number of bytes in those files
@@ -246,17 +340,18 @@ See the [size command](/commands/rclone_size/) command for more information on t
 
 // Size a directory
 func rcSize(ctx context.Context, in rc.Params) (out rc.Params, err error) {
-	f, err := rc.GetFs(in)
+	f, err := rc.GetFs(ctx, in)
 	if err != nil {
 		return nil, err
 	}
-	count, bytes, err := Count(ctx, f)
+	count, bytes, sizeless, err := Count(ctx, f)
 	if err != nil {
 		return nil, err
 	}
 	out = make(rc.Params)
 	out["count"] = count
 	out["bytes"] = bytes
+	out["sizeless"] = sizeless
 	return out, nil
 }
 
@@ -266,12 +361,14 @@ func init() {
 		AuthRequired: true,
 		Fn:           rcPublicLink,
 		Title:        "Create or retrieve a public link to the given file or folder.",
-		Help: `This takes the following parameters
+		Help: `This takes the following parameters:
 
-- fs - a remote name string eg "drive:"
-- remote - a path within that remote eg "dir"
+- fs - a remote name string e.g. "drive:"
+- remote - a path within that remote e.g. "dir"
+- unlink - boolean - if set removes the link rather than adding it (optional)
+- expire - string - the expiry time of the link e.g. "1d" (optional)
 
-Returns
+Returns:
 
 - url - URL of the resource
 
@@ -282,11 +379,18 @@ See the [link command](/commands/rclone_link/) command for more information on t
 
 // Make a public link
 func rcPublicLink(ctx context.Context, in rc.Params) (out rc.Params, err error) {
-	f, remote, err := rc.GetFsAndRemote(in)
+	f, remote, err := rc.GetFsAndRemote(ctx, in)
 	if err != nil {
 		return nil, err
 	}
-	url, err := PublicLink(ctx, f, remote)
+	unlink, _ := in.GetBool("unlink")
+	expire, err := in.GetDuration("expire")
+	if rc.IsErrParamNotFound(err) {
+		expire = time.Duration(fs.DurationOff)
+	} else if err != nil {
+		return nil, err
+	}
+	url, err := PublicLink(ctx, f, remote, fs.Duration(expire), unlink)
 	if err != nil {
 		return nil, err
 	}
@@ -300,9 +404,9 @@ func init() {
 		Path:  "operations/fsinfo",
 		Fn:    rcFsInfo,
 		Title: "Return information about the remote",
-		Help: `This takes the following parameters
+		Help: `This takes the following parameters:
 
-- fs - a remote name string eg "drive:"
+- fs - a remote name string e.g. "drive:"
 
 This returns info about the remote passed in;
 
@@ -361,14 +465,99 @@ This command does not have a command line equivalent so use this instead:
 
 // Fsinfo the remote
 func rcFsInfo(ctx context.Context, in rc.Params) (out rc.Params, err error) {
-	f, err := rc.GetFs(in)
+	f, err := rc.GetFs(ctx, in)
 	if err != nil {
 		return nil, err
 	}
 	info := GetFsInfo(f)
 	err = rc.Reshape(&out, info)
 	if err != nil {
-		return nil, errors.Wrap(err, "fsinfo Reshape failed")
+		return nil, fmt.Errorf("fsinfo Reshape failed: %w", err)
 	}
+	return out, nil
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:         "backend/command",
+		AuthRequired: true,
+		Fn:           rcBackend,
+		Title:        "Runs a backend command.",
+		Help: `This takes the following parameters:
+
+- command - a string with the command name
+- fs - a remote name string e.g. "drive:"
+- arg - a list of arguments for the backend command
+- opt - a map of string to string of options
+
+Returns:
+
+- result - result from the backend command
+
+Example:
+
+    rclone rc backend/command command=noop fs=. -o echo=yes -o blue -a path1 -a path2
+
+Returns
+
+` + "```" + `
+{
+	"result": {
+		"arg": [
+			"path1",
+			"path2"
+		],
+		"name": "noop",
+		"opt": {
+			"blue": "",
+			"echo": "yes"
+		}
+	}
+}
+` + "```" + `
+
+Note that this is the direct equivalent of using this "backend"
+command:
+
+    rclone backend noop . -o echo=yes -o blue path1 path2
+
+Note that arguments must be preceded by the "-a" flag
+
+See the [backend](/commands/rclone_backend/) command for more information.
+`,
+	})
+}
+
+// Make a public link
+func rcBackend(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	f, err := rc.GetFs(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	doCommand := f.Features().Command
+	if doCommand == nil {
+		return nil, fmt.Errorf("%v: doesn't support backend commands", f)
+	}
+	command, err := in.GetString("command")
+	if err != nil {
+		return nil, err
+	}
+	var opt = map[string]string{}
+	err = in.GetStructMissingOK("opt", &opt)
+	if err != nil {
+		return nil, err
+	}
+	var arg = []string{}
+	err = in.GetStructMissingOK("arg", &arg)
+	if err != nil {
+		return nil, err
+	}
+	result, err := doCommand(context.Background(), command, arg, opt)
+	if err != nil {
+		return nil, fmt.Errorf("command %q failed: %w", command, err)
+
+	}
+	out = make(rc.Params)
+	out["result"] = result
 	return out, nil
 }

@@ -4,16 +4,20 @@ package rc
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/coreos/go-semver/semver"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/obscure"
-	"github.com/rclone/rclone/fs/version"
 	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/buildinfo"
 )
 
 func init() {
@@ -56,7 +60,7 @@ Useful for testing error handling.`,
 
 // Return an error regardless
 func rcError(ctx context.Context, in Params) (out Params, err error) {
-	return nil, errors.Errorf("arbitrary error on input %+v", in)
+	return nil, fmt.Errorf("arbitrary error on input %+v", in)
 }
 
 func init() {
@@ -106,10 +110,10 @@ are explained in the go docs: https://golang.org/pkg/runtime/#MemStats
 
 The most interesting values for most people are:
 
-* HeapAlloc: This is the amount of memory rclone is actually using
-* HeapSys: This is the amount of memory rclone has obtained from the OS
-* Sys: this is the total amount of memory requested from the OS
-  * It is virtual memory so may include unused memory
+- HeapAlloc - this is the amount of memory rclone is actually using
+- HeapSys - this is the amount of memory rclone has obtained from the OS
+- Sys - this is the total amount of memory requested from the OS
+   - It is virtual memory so may include unused memory
 `,
 	})
 }
@@ -167,15 +171,17 @@ func init() {
 		Fn:    rcVersion,
 		Title: "Shows the current version of rclone and the go runtime.",
 		Help: `
-This shows the current version of go and the go runtime
+This shows the current version of go and the go runtime:
 
-- version - rclone version, eg "v1.44"
-- decomposed - version number as [major, minor, patch, subpatch]
-    - note patch and subpatch will be 999 for a git compiled version
+- version - rclone version, e.g. "v1.53.0"
+- decomposed - version number as [major, minor, patch]
 - isGit - boolean - true if this was compiled from the git version
+- isBeta - boolean - true if this is a beta version
 - os - OS in use as according to Go
 - arch - cpu architecture in use according to Go
 - goVersion - version of Go runtime in use
+- linking - type of rclone executable (static or dynamic)
+- goTags - space separated build tags or "none"
 
 `,
 	})
@@ -183,17 +189,21 @@ This shows the current version of go and the go runtime
 
 // Return version info
 func rcVersion(ctx context.Context, in Params) (out Params, err error) {
-	decomposed, err := version.New(fs.Version)
+	version, err := semver.NewVersion(fs.Version[1:])
 	if err != nil {
 		return nil, err
 	}
+	linking, tagString := buildinfo.GetLinkingAndTags()
 	out = Params{
 		"version":    fs.Version,
-		"decomposed": decomposed,
-		"isGit":      decomposed.IsGit(),
+		"decomposed": version.Slice(),
+		"isGit":      strings.HasSuffix(fs.Version, "-DEV"),
+		"isBeta":     version.PreRelease != "",
 		"os":         runtime.GOOS,
 		"arch":       runtime.GOARCH,
 		"goVersion":  runtime.Version(),
+		"linking":    linking,
+		"goTags":     tagString,
 	}
 	return out, nil
 }
@@ -207,7 +217,7 @@ func init() {
 Pass a clear string and rclone will obscure it for the config file:
 - clear - string
 
-Returns
+Returns:
 - obscured - string
 `,
 	})
@@ -235,7 +245,7 @@ func init() {
 		Fn:    rcQuit,
 		Title: "Terminates the app.",
 		Help: `
-(optional) Pass an exit code to be used for terminating the app:
+(Optional) Pass an exit code to be used for terminating the app:
 - exitCode - int
 `,
 	})
@@ -279,11 +289,11 @@ Once this is set you can look use this to profile the mutex contention:
 
     go tool pprof http://localhost:5572/debug/pprof/mutex
 
-Parameters
+Parameters:
 
 - rate - int
 
-Results
+Results:
 
 - previousRate - int
 `,
@@ -319,7 +329,7 @@ After calling this you can use this to see the blocking profile:
 
     go tool pprof http://localhost:5572/debug/pprof/block
 
-Parameters
+Parameters:
 
 - rate - int
 `,
@@ -334,4 +344,140 @@ func rcSetBlockProfileRate(ctx context.Context, in Params) (out Params, err erro
 	}
 	runtime.SetBlockProfileRate(int(rate))
 	return nil, nil
+}
+
+func init() {
+	Add(Call{
+		Path:          "core/command",
+		AuthRequired:  true,
+		Fn:            rcRunCommand,
+		NeedsRequest:  true,
+		NeedsResponse: true,
+		Title:         "Run a rclone terminal command over rc.",
+		Help: `This takes the following parameters:
+
+- command - a string with the command name.
+- arg - a list of arguments for the backend command.
+- opt - a map of string to string of options.
+- returnType - one of ("COMBINED_OUTPUT", "STREAM", "STREAM_ONLY_STDOUT", "STREAM_ONLY_STDERR").
+    - Defaults to "COMBINED_OUTPUT" if not set.
+    - The STREAM returnTypes will write the output to the body of the HTTP message.
+    - The COMBINED_OUTPUT will write the output to the "result" parameter.
+
+Returns:
+
+- result - result from the backend command.
+    - Only set when using returnType "COMBINED_OUTPUT".
+- error	 - set if rclone exits with an error code.
+- returnType - one of ("COMBINED_OUTPUT", "STREAM", "STREAM_ONLY_STDOUT", "STREAM_ONLY_STDERR").
+
+Example:
+
+    rclone rc core/command command=ls -a mydrive:/ -o max-depth=1
+    rclone rc core/command -a ls -a mydrive:/ -o max-depth=1
+
+Returns:
+
+` + "```" + `
+{
+	"error": false,
+	"result": "<Raw command line output>"
+}
+
+OR 
+{
+	"error": true,
+	"result": "<Raw command line output>"
+}
+
+` + "```" + `
+`,
+	})
+}
+
+// rcRunCommand runs an rclone command with the given args and flags
+func rcRunCommand(ctx context.Context, in Params) (out Params, err error) {
+	command, err := in.GetString("command")
+	if err != nil {
+		command = ""
+	}
+
+	var opt = map[string]string{}
+	err = in.GetStructMissingOK("opt", &opt)
+	if err != nil {
+		return nil, err
+	}
+
+	var arg = []string{}
+	err = in.GetStructMissingOK("arg", &arg)
+	if err != nil {
+		return nil, err
+	}
+
+	returnType, err := in.GetString("returnType")
+	if err != nil {
+		returnType = "COMBINED_OUTPUT"
+	}
+
+	var httpResponse http.ResponseWriter
+	httpResponse, err = in.GetHTTPResponseWriter()
+	if err != nil {
+		return nil, fmt.Errorf("response object is required\n" + err.Error())
+	}
+
+	var allArgs = []string{}
+	if command != "" {
+		// Add the command e.g.: ls to the args
+		allArgs = append(allArgs, command)
+	}
+	// Add all from arg
+	allArgs = append(allArgs, arg...)
+
+	// Add flags to args for e.g. --max-depth 1 comes in as { max-depth 1 }.
+	// Convert it to [ max-depth, 1 ] and append to args list
+	for key, value := range opt {
+		if len(key) == 1 {
+			allArgs = append(allArgs, "-"+key)
+		} else {
+			allArgs = append(allArgs, "--"+key)
+		}
+		allArgs = append(allArgs, value)
+	}
+
+	// Get the path for the current executable which was used to run rclone.
+	ex, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(ctx, ex, allArgs...)
+
+	if returnType == "COMBINED_OUTPUT" {
+		// Run the command and get the output for error and stdout combined.
+
+		out, err := cmd.CombinedOutput()
+
+		if err != nil {
+			return Params{
+				"result": string(out),
+				"error":  true,
+			}, nil
+		}
+		return Params{
+			"result": string(out),
+			"error":  false,
+		}, nil
+	} else if returnType == "STREAM_ONLY_STDOUT" {
+		cmd.Stdout = httpResponse
+	} else if returnType == "STREAM_ONLY_STDERR" {
+		cmd.Stderr = httpResponse
+	} else if returnType == "STREAM" {
+		cmd.Stdout = httpResponse
+		cmd.Stderr = httpResponse
+	} else {
+		return nil, fmt.Errorf("Unknown returnType %q", returnType)
+	}
+
+	err = cmd.Run()
+	return nil, err
 }

@@ -10,28 +10,35 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/webdav/api"
 	"github.com/rclone/rclone/backend/webdav/odrvcookie"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
+
+	ntlmssp "github.com/Azure/go-ntlmssp"
 )
 
 const (
@@ -41,23 +48,33 @@ const (
 	defaultDepth  = "1" // depth for PROPFIND
 )
 
+const defaultEncodingSharepointNTLM = (encoder.EncodeWin |
+	encoder.EncodeHashPercent | // required by IIS/8.5 in contrast with onedrive which doesn't need it
+	(encoder.Display &^ encoder.EncodeDot) | // test with IIS/8.5 shows that EncodeDot is not needed
+	encoder.EncodeBackSlash |
+	encoder.EncodeLeftSpace |
+	encoder.EncodeLeftTilde |
+	encoder.EncodeRightPeriod |
+	encoder.EncodeRightSpace |
+	encoder.EncodeInvalidUtf8)
+
 // Register with Fs
 func init() {
+	configEncodingHelp := fmt.Sprintf(
+		"%s\n\nDefault encoding is %s for sharepoint-ntlm or identity otherwise.",
+		config.ConfigEncodingHelp, defaultEncodingSharepointNTLM)
+
 	fs.Register(&fs.RegInfo{
 		Name:        "webdav",
 		Description: "Webdav",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name:     "url",
-			Help:     "URL of http host to connect to",
+			Help:     "URL of http host to connect to.\n\nE.g. https://example.com.",
 			Required: true,
-			Examples: []fs.OptionExample{{
-				Value: "https://example.com",
-				Help:  "Connect to example.com",
-			}},
 		}, {
 			Name: "vendor",
-			Help: "Name of the Webdav site/service/software you are using",
+			Help: "Name of the Webdav site/service/software you are using.",
 			Examples: []fs.OptionExample{{
 				Value: "nextcloud",
 				Help:  "Nextcloud",
@@ -66,24 +83,46 @@ func init() {
 				Help:  "Owncloud",
 			}, {
 				Value: "sharepoint",
-				Help:  "Sharepoint",
+				Help:  "Sharepoint Online, authenticated by Microsoft account",
+			}, {
+				Value: "sharepoint-ntlm",
+				Help:  "Sharepoint with NTLM authentication, usually self-hosted or on-premises",
 			}, {
 				Value: "other",
 				Help:  "Other site/service or software",
 			}},
 		}, {
 			Name: "user",
-			Help: "User name",
+			Help: "User name.\n\nIn case NTLM authentication is used, the username should be in the format 'Domain\\User'.",
 		}, {
 			Name:       "pass",
 			Help:       "Password.",
 			IsPassword: true,
 		}, {
 			Name: "bearer_token",
-			Help: "Bearer token instead of user/pass (eg a Macaroon)",
+			Help: "Bearer token instead of user/pass (e.g. a Macaroon).",
 		}, {
 			Name:     "bearer_token_command",
-			Help:     "Command to run to get a bearer token",
+			Help:     "Command to run to get a bearer token.",
+			Advanced: true,
+		}, {
+			Name:     config.ConfigEncoding,
+			Help:     configEncodingHelp,
+			Advanced: true,
+		}, {
+			Name: "headers",
+			Help: `Set HTTP headers for all transactions.
+
+Use this to set additional HTTP headers for all transactions
+
+The input format is comma separated list of key,value pairs.  Standard
+[CSV encoding](https://godoc.org/encoding/csv) may be used.
+
+For example, to set a Cookie use 'Cookie,name=value', or '"Cookie","name=value"'.
+
+You can set multiple headers, e.g. '"Cookie","name=value","Authorization","xxx"'.
+`,
+			Default:  fs.CommaSepList{},
 			Advanced: true,
 		}},
 	})
@@ -91,12 +130,14 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	URL                string `config:"url"`
-	Vendor             string `config:"vendor"`
-	User               string `config:"user"`
-	Pass               string `config:"pass"`
-	BearerToken        string `config:"bearer_token"`
-	BearerTokenCommand string `config:"bearer_token_command"`
+	URL                string               `config:"url"`
+	Vendor             string               `config:"vendor"`
+	User               string               `config:"user"`
+	Pass               string               `config:"pass"`
+	BearerToken        string               `config:"bearer_token"`
+	BearerTokenCommand string               `config:"bearer_token_command"`
+	Enc                encoder.MultiEncoder `config:"encoding"`
+	Headers            fs.CommaSepList      `config:"headers"`
 }
 
 // Fs represents a remote webdav
@@ -113,8 +154,10 @@ type Fs struct {
 	canStream          bool          // set if can stream
 	useOCMtime         bool          // set if can use X-OC-Mtime
 	retryWithZeroDepth bool          // some vendors (sharepoint) won't list files when Depth is 1 (our default)
+	checkBeforePurge   bool          // enables extra check that directory to purge really exists
 	hasMD5             bool          // set if can use owncloud style checksums for MD5
 	hasSHA1            bool          // set if can use owncloud style checksums for SHA1
+	ntlmAuthMu         sync.Mutex    // mutex to serialize NTLM auth roundtrips
 }
 
 // Object describes a webdav object
@@ -165,7 +208,10 @@ var retryErrorCodes = []int{
 
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
-func (f *Fs) shouldRetry(resp *http.Response, err error) (bool, error) {
+func (f *Fs) shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	if fserrors.ContextError(ctx, &err) {
+		return false, err
+	}
 	// If we have a bearer token command and it has expired then refresh it
 	if f.opt.BearerTokenCommand != "" && resp != nil && resp.StatusCode == 401 {
 		fs.Debugf(f, "Bearer token expired: %v", err)
@@ -176,6 +222,22 @@ func (f *Fs) shouldRetry(resp *http.Response, err error) (bool, error) {
 		return true, err
 	}
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
+}
+
+// safeRoundTripper is a wrapper for http.RoundTripper that serializes
+// http roundtrips. NTLM authentication sequence can involve up to four
+// rounds of negotiations and might fail due to concurrency.
+// This wrapper allows to use ntlmssp.Negotiator safely with goroutines.
+type safeRoundTripper struct {
+	fs *Fs
+	rt http.RoundTripper
+}
+
+// RoundTrip guards wrapped RoundTripper by a mutex.
+func (srt *safeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	srt.fs.ntlmAuthMu.Lock()
+	defer srt.fs.ntlmAuthMu.Unlock()
+	return srt.rt.RoundTrip(req)
 }
 
 // itemIsDir returns true if the item is a directory
@@ -223,7 +285,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, nil, &result)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if apiErr, ok := err.(*api.Error); ok {
 		// does not exist
@@ -241,7 +303,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 		}
 	}
 	if err != nil {
-		return nil, errors.Wrap(err, "read metadata failed")
+		return nil, fmt.Errorf("read metadata failed: %w", err)
 	}
 	if len(result.Responses) < 1 {
 		return nil, fs.ErrorObjectNotFound
@@ -251,7 +313,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 		return nil, fs.ErrorObjectNotFound
 	}
 	if itemIsDir(&item) {
-		return nil, fs.ErrorNotAFile
+		return nil, fs.ErrorIsDir
 	}
 	return &item.Props, nil
 }
@@ -260,7 +322,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 func errorHandler(resp *http.Response) error {
 	body, err := rest.ReadBody(resp)
 	if err != nil {
-		return errors.Wrap(err, "error when trying to read error from body")
+		return fmt.Errorf("error when trying to read error from body: %w", err)
 	}
 	// Decode error response
 	errResponse := new(api.Error)
@@ -284,7 +346,11 @@ func addSlash(s string) string {
 
 // filePath returns a file path (f.root, file)
 func (f *Fs) filePath(file string) string {
-	return rest.URLPathEscape(path.Join(f.root, file))
+	subPath := path.Join(f.root, file)
+	if f.opt.Enc != encoder.EncodeZero {
+		subPath = f.opt.Enc.FromStandardPath(subPath)
+	}
+	return rest.URLPathEscape(subPath)
 }
 
 // dirPath returns a directory path (f.root, dir)
@@ -298,14 +364,19 @@ func (o *Object) filePath() string {
 }
 
 // NewFs constructs an Fs from the path, container:path
-func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
-	ctx := context.Background()
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
 	if err != nil {
 		return nil, err
 	}
+
+	if len(opt.Headers)%2 != 0 {
+		return nil, errors.New("odd number of headers supplied")
+	}
+	fs.Debugf(nil, "found headers: %v", opt.Headers)
+
 	rootIsDir := strings.HasSuffix(root, "/")
 	root = strings.Trim(root, "/")
 
@@ -316,13 +387,17 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		var err error
 		opt.Pass, err = obscure.Reveal(opt.Pass)
 		if err != nil {
-			return nil, errors.Wrap(err, "couldn't decrypt password")
+			return nil, fmt.Errorf("couldn't decrypt password: %w", err)
 		}
 	}
 	if opt.Vendor == "" {
 		opt.Vendor = "other"
 	}
 	root = strings.Trim(root, "/")
+
+	if opt.Enc == encoder.EncodeZero && opt.Vendor == "sharepoint-ntlm" {
+		opt.Enc = defaultEncodingSharepointNTLM
+	}
 
 	// Parse the endpoint
 	u, err := url.Parse(opt.URL)
@@ -336,13 +411,31 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		opt:         *opt,
 		endpoint:    u,
 		endpointURL: u.String(),
-		srv:         rest.NewClient(fshttp.NewClient(fs.Config)).SetRoot(u.String()),
-		pacer:       fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		pacer:       fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		precision:   fs.ModTimeNotSupported,
 	}
+
+	client := fshttp.NewClient(ctx)
+	if opt.Vendor == "sharepoint-ntlm" {
+		// Disable transparent HTTP/2 support as per https://golang.org/pkg/net/http/ ,
+		// otherwise any connection to IIS 10.0 fails with 'stream error: stream ID 39; HTTP_1_1_REQUIRED'
+		// https://docs.microsoft.com/en-us/iis/get-started/whats-new-in-iis-10/http2-on-iis says:
+		// 'Windows authentication (NTLM/Kerberos/Negotiate) is not supported with HTTP/2.'
+		t := fshttp.NewTransportCustom(ctx, func(t *http.Transport) {
+			t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		})
+
+		// Add NTLM layer
+		client.Transport = &safeRoundTripper{
+			fs: f,
+			rt: ntlmssp.Negotiator{RoundTripper: t},
+		}
+	}
+	f.srv = rest.NewClient(client).SetRoot(u.String())
+
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
-	}).Fill(f)
+	}).Fill(ctx, f)
 	if opt.User != "" || opt.Pass != "" {
 		f.srv.SetUserPass(opt.User, opt.Pass)
 	} else if opt.BearerToken != "" {
@@ -353,10 +446,16 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 			return nil, err
 		}
 	}
+	if opt.Headers != nil {
+		f.addHeaders(opt.Headers)
+	}
 	f.srv.SetErrorHandler(errorHandler)
 	err = f.setQuirks(ctx, opt.Vendor)
 	if err != nil {
 		return nil, err
+	}
+	if !f.findHeader(opt.Headers, "Referer") {
+		f.srv.SetHeader("Referer", u.String())
 	}
 
 	if root != "" && !rootIsDir {
@@ -368,7 +467,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		}
 		_, err := f.NewObject(ctx, remote)
 		if err != nil {
-			if errors.Cause(err) == fs.ErrorObjectNotFound || errors.Cause(err) == fs.ErrorNotAFile {
+			if errors.Is(err, fs.ErrorObjectNotFound) || errors.Is(err, fs.ErrorIsDir) {
 				// File doesn't exist so return old f
 				f.root = root
 				return f, nil
@@ -406,9 +505,29 @@ func (f *Fs) fetchBearerToken(cmd string) (string, error) {
 		if stderrString == "" {
 			stderrString = stdoutString
 		}
-		return "", errors.Wrapf(err, "failed to get bearer token using %q: %s", f.opt.BearerTokenCommand, stderrString)
+		return "", fmt.Errorf("failed to get bearer token using %q: %s: %w", f.opt.BearerTokenCommand, stderrString, err)
 	}
 	return stdoutString, nil
+}
+
+// Adds the configured headers to the request if any
+func (f *Fs) addHeaders(headers fs.CommaSepList) {
+	for i := 0; i < len(headers); i += 2 {
+		key := f.opt.Headers[i]
+		value := f.opt.Headers[i+1]
+		f.srv.SetHeader(key, value)
+	}
+}
+
+// Returns true if the header was configured
+func (f *Fs) findHeader(headers fs.CommaSepList, find string) bool {
+	for i := 0; i < len(headers); i += 2 {
+		key := f.opt.Headers[i]
+		if strings.EqualFold(key, find) {
+			return true
+		}
+	}
+	return false
 }
 
 // fetch the bearer token and set it if successful
@@ -464,6 +583,16 @@ func (f *Fs) setQuirks(ctx context.Context, vendor string) error {
 		// to determine if we may have found a file, the request has to be resent
 		// with the depth set to 0
 		f.retryWithZeroDepth = true
+	case "sharepoint-ntlm":
+		// Sharepoint with NTLM authentication
+		// See comment above
+		f.retryWithZeroDepth = true
+
+		// Sharepoint 2016 returns status 204 to the purge request
+		// even if the directory to purge does not really exist
+		// so we must perform an extra check to detect this
+		// condition and return a proper error code.
+		f.checkBeforePurge = true
 	case "other":
 	default:
 		fs.Debugf(f, "Unknown vendor %q", vendor)
@@ -545,7 +674,7 @@ func (f *Fs) listAll(ctx context.Context, dir string, directoriesOnly bool, file
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, nil, &result)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		if apiErr, ok := err.(*api.Error); ok {
@@ -557,12 +686,12 @@ func (f *Fs) listAll(ctx context.Context, dir string, directoriesOnly bool, file
 				return found, fs.ErrorDirNotFound
 			}
 		}
-		return found, errors.Wrap(err, "couldn't list files")
+		return found, fmt.Errorf("couldn't list files: %w", err)
 	}
 	//fmt.Printf("result = %#v", &result)
 	baseURL, err := rest.URLJoin(f.endpoint, opts.Path)
 	if err != nil {
-		return false, errors.Wrap(err, "couldn't join URL")
+		return false, fmt.Errorf("couldn't join URL: %w", err)
 	}
 	for i := range result.Responses {
 		item := &result.Responses[i]
@@ -582,7 +711,11 @@ func (f *Fs) listAll(ctx context.Context, dir string, directoriesOnly bool, file
 			fs.Debugf(nil, "Item with unknown path received: %q, %q", u.Path, baseURL.Path)
 			continue
 		}
-		remote := path.Join(dir, u.Path[len(baseURL.Path):])
+		subPath := u.Path[len(baseURL.Path):]
+		if f.opt.Enc != encoder.EncodeZero {
+			subPath = f.opt.Enc.ToStandardPath(subPath)
+		}
+		remote := path.Join(dir, subPath)
 		if strings.HasSuffix(remote, "/") {
 			remote = remote[:len(remote)-1]
 		}
@@ -684,8 +817,8 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 
 // mkParentDir makes the parent of the native path dirPath if
 // necessary and any directories above that
-func (f *Fs) mkParentDir(ctx context.Context, dirPath string) error {
-	// defer log.Trace(dirPath, "")("")
+func (f *Fs) mkParentDir(ctx context.Context, dirPath string) (err error) {
+	// defer log.Trace(dirPath, "")("err=%v", &err)
 	// chop off trailing / if it exists
 	if strings.HasSuffix(dirPath, "/") {
 		dirPath = dirPath[:len(dirPath)-1]
@@ -695,6 +828,27 @@ func (f *Fs) mkParentDir(ctx context.Context, dirPath string) error {
 		parent = ""
 	}
 	return f.mkdir(ctx, parent)
+}
+
+// _dirExists - list dirPath to see if it exists
+//
+// dirPath should be a native path ending in a /
+func (f *Fs) _dirExists(ctx context.Context, dirPath string) (exists bool) {
+	opts := rest.Opts{
+		Method: "PROPFIND",
+		Path:   dirPath,
+		ExtraHeaders: map[string]string{
+			"Depth": "0",
+		},
+	}
+	var result api.Multistatus
+	var resp *http.Response
+	var err error
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallXML(ctx, &opts, nil, &result)
+		return f.shouldRetry(ctx, resp, err)
+	})
+	return err == nil
 }
 
 // low level mkdir, only makes the directory, doesn't attempt to create parents
@@ -714,22 +868,32 @@ func (f *Fs) _mkdir(ctx context.Context, dirPath string) error {
 	}
 	err := f.pacer.Call(func() (bool, error) {
 		resp, err := f.srv.Call(ctx, &opts)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if apiErr, ok := err.(*api.Error); ok {
-		// already exists
+		// Check if it already exists. The response code for this isn't
+		// defined in the RFC so the implementations vary wildly.
+		//
 		// owncloud returns 423/StatusLocked if the create is already in progress
 		if apiErr.StatusCode == http.StatusMethodNotAllowed || apiErr.StatusCode == http.StatusNotAcceptable || apiErr.StatusCode == http.StatusLocked {
 			return nil
 		}
+		// 4shared returns a 409/StatusConflict here which clashes
+		// horribly with the intermediate paths don't exist meaning. So
+		// check to see if actually exists. This will correct other
+		// error codes too.
+		if f._dirExists(ctx, dirPath) {
+			return nil
+		}
+
 	}
 	return err
 }
 
 // mkdir makes the directory and parents using native paths
-func (f *Fs) mkdir(ctx context.Context, dirPath string) error {
-	// defer log.Trace(dirPath, "")("")
-	err := f._mkdir(ctx, dirPath)
+func (f *Fs) mkdir(ctx context.Context, dirPath string) (err error) {
+	// defer log.Trace(dirPath, "")("err=%v", &err)
+	err = f._mkdir(ctx, dirPath)
 	if apiErr, ok := err.(*api.Error); ok {
 		// parent does not exist so create it first then try again
 		if apiErr.StatusCode == http.StatusConflict {
@@ -768,6 +932,21 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		if notEmpty {
 			return fs.ErrorDirectoryNotEmpty
 		}
+	} else if f.checkBeforePurge {
+		// We are doing purge as the `check` argument is unset.
+		// The quirk says that we are working with Sharepoint 2016.
+		// This provider returns status 204 even if the purged directory
+		// does not really exist so we perform an extra check here.
+		// Only the existence is checked, all other errors must be
+		// ignored here to make the rclone test suite pass.
+		depth := defaultDepth
+		if f.retryWithZeroDepth {
+			depth = "0"
+		}
+		_, err := f.readMetaDataForPath(ctx, dir, depth)
+		if err == fs.ErrorObjectNotFound {
+			return fs.ErrorDirNotFound
+		}
 	}
 	opts := rest.Opts{
 		Method:     "DELETE",
@@ -778,10 +957,10 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 	var err error
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, nil, nil)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "rmdir failed")
+		return fmt.Errorf("rmdir failed: %w", err)
 	}
 	// FIXME parse Multistatus response
 	return nil
@@ -799,7 +978,7 @@ func (f *Fs) Precision() time.Duration {
 	return f.precision
 }
 
-// Copy or Move src to this remote using server side copy operations.
+// Copy or Move src to this remote using server-side copy operations.
 //
 // This is stored with the remote path given
 //
@@ -820,11 +999,11 @@ func (f *Fs) copyOrMove(ctx context.Context, src fs.Object, remote string, metho
 	dstPath := f.filePath(remote)
 	err := f.mkParentDir(ctx, dstPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "Copy mkParentDir failed")
+		return nil, fmt.Errorf("Copy mkParentDir failed: %w", err)
 	}
 	destinationURL, err := rest.URLJoin(f.endpoint, dstPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "copyOrMove couldn't join URL")
+		return nil, fmt.Errorf("copyOrMove couldn't join URL: %w", err)
 	}
 	var resp *http.Response
 	opts := rest.Opts{
@@ -837,23 +1016,23 @@ func (f *Fs) copyOrMove(ctx context.Context, src fs.Object, remote string, metho
 		},
 	}
 	if f.useOCMtime {
-		opts.ExtraHeaders["X-OC-Mtime"] = fmt.Sprintf("%f", float64(src.ModTime(ctx).UnixNano())/1e9)
+		opts.ExtraHeaders["X-OC-Mtime"] = fmt.Sprintf("%d", src.ModTime(ctx).Unix())
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.Call(ctx, &opts)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "Copy call failed")
+		return nil, fmt.Errorf("Copy call failed: %w", err)
 	}
 	dstObj, err := f.NewObject(ctx, remote)
 	if err != nil {
-		return nil, errors.Wrap(err, "Copy NewObject failed")
+		return nil, fmt.Errorf("Copy NewObject failed: %w", err)
 	}
 	return dstObj, nil
 }
 
-// Copy src to this remote using server side copy operations.
+// Copy src to this remote using server-side copy operations.
 //
 // This is stored with the remote path given
 //
@@ -866,16 +1045,16 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return f.copyOrMove(ctx, src, remote, "COPY")
 }
 
-// Purge deletes all the files and the container
+// Purge deletes all the files in the directory
 //
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purgeCheck(ctx, "", false)
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	return f.purgeCheck(ctx, dir, false)
 }
 
-// Move src to this remote using server side move operations.
+// Move src to this remote using server-side move operations.
 //
 // This is stored with the remote path given
 //
@@ -889,7 +1068,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 }
 
 // DirMove moves src, srcRemote to this remote at dstRemote
-// using server side move operations.
+// using server-side move operations.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -911,18 +1090,18 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		return fs.ErrorDirExists
 	}
 	if err != fs.ErrorDirNotFound {
-		return errors.Wrap(err, "DirMove dirExists dst failed")
+		return fmt.Errorf("DirMove dirExists dst failed: %w", err)
 	}
 
 	// Make sure the parent directory exists
 	err = f.mkParentDir(ctx, dstPath)
 	if err != nil {
-		return errors.Wrap(err, "DirMove mkParentDir dst failed")
+		return fmt.Errorf("DirMove mkParentDir dst failed: %w", err)
 	}
 
 	destinationURL, err := rest.URLJoin(f.endpoint, dstPath)
 	if err != nil {
-		return errors.Wrap(err, "DirMove couldn't join URL")
+		return fmt.Errorf("DirMove couldn't join URL: %w", err)
 	}
 
 	var resp *http.Response
@@ -937,10 +1116,10 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.Call(ctx, &opts)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "DirMove MOVE call failed")
+		return fmt.Errorf("DirMove MOVE call failed: %w", err)
 	}
 	return nil
 }
@@ -974,27 +1153,25 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
  </D:prop>
 </D:propfind>
 `))
-	var q = api.Quota{
-		Available: -1,
-		Used:      -1,
-	}
+	var q api.Quota
 	var resp *http.Response
 	var err error
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, nil, &q)
-		return f.shouldRetry(resp, err)
+		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "about call failed")
+		return nil, err
 	}
 	usage := &fs.Usage{}
-	if q.Available != 0 || q.Used != 0 {
-		if q.Available >= 0 && q.Used >= 0 {
-			usage.Total = fs.NewUsageValue(q.Available + q.Used)
-		}
-		if q.Used >= 0 {
-			usage.Used = fs.NewUsageValue(q.Used)
-		}
+	if i, err := strconv.ParseInt(q.Used, 10, 64); err == nil && i >= 0 {
+		usage.Used = fs.NewUsageValue(i)
+	}
+	if i, err := strconv.ParseInt(q.Available, 10, 64); err == nil && i >= 0 {
+		usage.Free = fs.NewUsageValue(i)
+	}
+	if usage.Used != nil && usage.Free != nil {
+		usage.Total = fs.NewUsageValue(*usage.Used + *usage.Free)
 	}
 	return usage, nil
 }
@@ -1098,14 +1275,18 @@ func (o *Object) Storable() bool {
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	var resp *http.Response
+	fs.FixRangeOption(options, o.size)
 	opts := rest.Opts{
 		Method:  "GET",
 		Path:    o.filePath(),
 		Options: options,
+		ExtraHeaders: map[string]string{
+			"Depth": "0",
+		},
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		return o.fs.shouldRetry(resp, err)
+		return o.fs.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
@@ -1121,7 +1302,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	err = o.fs.mkParentDir(ctx, o.filePath())
 	if err != nil {
-		return errors.Wrap(err, "Update mkParentDir failed")
+		return fmt.Errorf("Update mkParentDir failed: %w", err)
 	}
 
 	size := src.Size()
@@ -1133,11 +1314,12 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		NoResponse:    true,
 		ContentLength: &size, // FIXME this isn't necessary with owncloud - See https://github.com/nextcloud/nextcloud-snap/issues/365
 		ContentType:   fs.MimeType(ctx, src),
+		Options:       options,
 	}
 	if o.fs.useOCMtime || o.fs.hasMD5 || o.fs.hasSHA1 {
 		opts.ExtraHeaders = map[string]string{}
 		if o.fs.useOCMtime {
-			opts.ExtraHeaders["X-OC-Mtime"] = fmt.Sprintf("%f", float64(src.ModTime(ctx).UnixNano())/1e9)
+			opts.ExtraHeaders["X-OC-Mtime"] = fmt.Sprintf("%d", src.ModTime(ctx).Unix())
 		}
 		// Set one upload checksum
 		// Owncloud uses one checksum only to check the upload and stores its own SHA1 and MD5
@@ -1155,7 +1337,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		return o.fs.shouldRetry(resp, err)
+		return o.fs.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		// Give the WebDAV server a chance to get its internal state in order after the
@@ -1182,7 +1364,7 @@ func (o *Object) Remove(ctx context.Context) error {
 	}
 	return o.fs.pacer.Call(func() (bool, error) {
 		resp, err := o.fs.srv.Call(ctx, &opts)
-		return o.fs.shouldRetry(resp, err)
+		return o.fs.shouldRetry(ctx, resp, err)
 	})
 }
 

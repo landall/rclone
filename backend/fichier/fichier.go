@@ -2,6 +2,7 @@ package fichier
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -23,28 +23,36 @@ import (
 )
 
 const (
-	rootID        = "0"
-	apiBaseURL    = "https://api.1fichier.com/v1"
-	minSleep      = 334 * time.Millisecond // 3 API calls per second is recommended
-	maxSleep      = 5 * time.Second
-	decayConstant = 2 // bigger for slower decay, exponential
+	rootID         = "0"
+	apiBaseURL     = "https://api.1fichier.com/v1"
+	minSleep       = 400 * time.Millisecond // api is extremely rate limited now
+	maxSleep       = 5 * time.Second
+	decayConstant  = 2 // bigger for slower decay, exponential
+	attackConstant = 0 // start with max sleep
 )
 
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "fichier",
 		Description: "1Fichier",
-		Config: func(name string, config configmap.Mapper) {
-		},
-		NewFs: NewFs,
+		NewFs:       NewFs,
 		Options: []fs.Option{{
-			Help: "Your API Key, get it from https://1fichier.com/console/params.pl",
+			Help: "Your API Key, get it from https://1fichier.com/console/params.pl.",
 			Name: "api_key",
 		}, {
-			Help:     "If you want to download a shared folder, add this parameter",
+			Help:     "If you want to download a shared folder, add this parameter.",
 			Name:     "shared_folder",
-			Required: false,
 			Advanced: true,
+		}, {
+			Help:       "If you want to download a shared file that is password protected, add this parameter.",
+			Name:       "file_password",
+			Advanced:   true,
+			IsPassword: true,
+		}, {
+			Help:       "If you want to list the files in a shared folder that is password protected, add this parameter.",
+			Name:       "folder_password",
+			Advanced:   true,
+			IsPassword: true,
 		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
@@ -76,9 +84,11 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	APIKey       string               `config:"api_key"`
-	SharedFolder string               `config:"shared_folder"`
-	Enc          encoder.MultiEncoder `config:"encoding"`
+	APIKey         string               `config:"api_key"`
+	SharedFolder   string               `config:"shared_folder"`
+	FilePassword   string               `config:"file_password"`
+	FolderPassword string               `config:"folder_password"`
+	Enc            encoder.MultiEncoder `config:"encoding"`
 }
 
 // Fs is the interface a cloud storage system must provide
@@ -166,7 +176,7 @@ func (f *Fs) Features() *fs.Features {
 //
 // On Windows avoid single character remote names as they can be mixed
 // up with drive letters.
-func NewFs(name string, root string, config configmap.Mapper) (fs.Fs, error) {
+func NewFs(ctx context.Context, name string, root string, config configmap.Mapper) (fs.Fs, error) {
 	opt := new(Options)
 	err := configstruct.Set(config, opt)
 	if err != nil {
@@ -185,24 +195,23 @@ func NewFs(name string, root string, config configmap.Mapper) (fs.Fs, error) {
 		name:       name,
 		root:       root,
 		opt:        *opt,
-		pacer:      fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		pacer:      fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant), pacer.AttackConstant(attackConstant))),
 		baseClient: &http.Client{},
 	}
 
 	f.features = (&fs.Features{
 		DuplicateFiles:          true,
 		CanHaveEmptyDirectories: true,
-	}).Fill(f)
+		ReadMimeType:            true,
+	}).Fill(ctx, f)
 
-	client := fshttp.NewClient(fs.Config)
+	client := fshttp.NewClient(ctx)
 
 	f.rest = rest.NewClient(client).SetRoot(apiBaseURL)
 
 	f.rest.SetHeader("Authorization", "Bearer "+f.opt.APIKey)
 
 	f.dirCache = dircache.New(root, rootID, f)
-
-	ctx := context.Background()
 
 	// Find the current root
 	err = f.dirCache.FindRoot(ctx, false)
@@ -226,7 +235,7 @@ func NewFs(name string, root string, config configmap.Mapper) (fs.Fs, error) {
 			}
 			return nil, err
 		}
-		f.features.Fill(&tempF)
+		f.features.Fill(ctx, &tempF)
 		// XXX: update the old f here instead of returning tempF, since
 		// `features` were already filled with functions having *f as a receiver.
 		// See https://github.com/rclone/rclone/issues/2182
@@ -263,7 +272,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	leaf, directoryID, err := f.dirCache.FindRootAndPath(ctx, remote, false)
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, remote, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
 			return nil, fs.ErrorObjectNotFound
@@ -297,7 +306,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // Put in to the remote path with the modTime given of the given size
 //
-// When called from outside a Fs by rclone, src.Size() will always be >= 0.
+// When called from outside an Fs by rclone, src.Size() will always be >= 0.
 // But for unknown-sized objects (indicated by src.Size() == -1), Put should either
 // return an error or upload it properly (rather than e.g. calling panic).
 //
@@ -305,10 +314,10 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 // will return the object and the error, otherwise will return
 // nil and the error
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	exisitingObj, err := f.NewObject(ctx, src.Remote())
+	existingObj, err := f.NewObject(ctx, src.Remote())
 	switch err {
 	case nil:
-		return exisitingObj, exisitingObj.Update(ctx, in, src, options...)
+		return existingObj, existingObj.Update(ctx, in, src, options...)
 	case fs.ErrorObjectNotFound:
 		// Not found so create it
 		return f.PutUnchecked(ctx, in, src, options...)
@@ -322,7 +331,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 // This will create a duplicate if we upload a new file without
 // checking to see if there is one already - use Put() for that.
 func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, remote string, size int64, options ...fs.OpenOption) (fs.Object, error) {
-	if size > int64(100e9) {
+	if size > int64(300e9) {
 		return nil, errors.New("File too big, cant upload")
 	} else if size == 0 {
 		return nil, fs.ErrorCantUploadEmptyFiles
@@ -333,12 +342,12 @@ func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, remote string, size
 		return nil, err
 	}
 
-	leaf, directoryID, err := f.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = f.uploadFile(ctx, in, size, leaf, directoryID, nodeResponse.ID, nodeResponse.URL)
+	_, err = f.uploadFile(ctx, in, size, leaf, directoryID, nodeResponse.ID, nodeResponse.URL, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -348,8 +357,10 @@ func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, remote string, size
 		return nil, err
 	}
 
-	if len(fileUploadResponse.Links) != 1 {
-		return nil, errors.New("unexpected amount of files")
+	if len(fileUploadResponse.Links) == 0 {
+		return nil, errors.New("upload response not found")
+	} else if len(fileUploadResponse.Links) > 1 {
+		fs.Debugf(remote, "Multiple upload responses found, using the first")
 	}
 
 	link := fileUploadResponse.Links[0]
@@ -363,7 +374,6 @@ func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, remote string, size
 		fs:     f,
 		remote: remote,
 		file: File{
-			ACL:         0,
 			CDN:         0,
 			Checksum:    link.Whirlpool,
 			ContentType: "",
@@ -388,13 +398,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 //
 // Shouldn't return an error if it already exists
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	err := f.dirCache.FindRoot(ctx, true)
-	if err != nil {
-		return err
-	}
-	if dir != "" {
-		_, err = f.dirCache.FindDir(ctx, dir, true)
-	}
+	_, err := f.dirCache.FindDir(ctx, dir, true)
 	return err
 }
 
@@ -402,11 +406,6 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 //
 // Return an error if it doesn't exist or isn't empty
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
-	err := f.dirCache.FindRoot(ctx, false)
-	if err != nil {
-		return err
-	}
-
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
 		return err
@@ -427,9 +426,135 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	return nil
 }
 
+// Move src to this remote using server side move operations.
+func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+	srcObj, ok := src.(*Object)
+	if !ok {
+		fs.Debugf(src, "Can't move - not same remote type")
+		return nil, fs.ErrorCantMove
+	}
+
+	// Find current directory ID
+	_, currentDirectoryID, err := f.dirCache.FindPath(ctx, remote, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create temporary object
+	dstObj, leaf, directoryID, err := f.createObject(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+
+	// If it is in the correct directory, just rename it
+	var url string
+	if currentDirectoryID == directoryID {
+		resp, err := f.renameFile(ctx, srcObj.file.URL, leaf)
+		if err != nil {
+			return nil, fmt.Errorf("couldn't rename file: %w", err)
+		}
+		if resp.Status != "OK" {
+			return nil, fmt.Errorf("couldn't rename file: %s", resp.Message)
+		}
+		url = resp.URLs[0].URL
+	} else {
+		folderID, err := strconv.Atoi(directoryID)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := f.moveFile(ctx, srcObj.file.URL, folderID, leaf)
+		if err != nil {
+			return nil, fmt.Errorf("couldn't move file: %w", err)
+		}
+		if resp.Status != "OK" {
+			return nil, fmt.Errorf("couldn't move file: %s", resp.Message)
+		}
+		url = resp.URLs[0]
+	}
+
+	file, err := f.readFileInfo(ctx, url)
+	if err != nil {
+		return nil, errors.New("couldn't read file data")
+	}
+	dstObj.setMetaData(*file)
+	return dstObj, nil
+}
+
+// Copy src to this remote using server side move operations.
+func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+	srcObj, ok := src.(*Object)
+	if !ok {
+		fs.Debugf(src, "Can't move - not same remote type")
+		return nil, fs.ErrorCantMove
+	}
+
+	// Create temporary object
+	dstObj, leaf, directoryID, err := f.createObject(ctx, remote)
+	if err != nil {
+		return nil, err
+	}
+
+	folderID, err := strconv.Atoi(directoryID)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := f.copyFile(ctx, srcObj.file.URL, folderID, leaf)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't move file: %w", err)
+	}
+	if resp.Status != "OK" {
+		return nil, fmt.Errorf("couldn't move file: %s", resp.Message)
+	}
+
+	file, err := f.readFileInfo(ctx, resp.URLs[0].ToURL)
+	if err != nil {
+		return nil, errors.New("couldn't read file data")
+	}
+	dstObj.setMetaData(*file)
+	return dstObj, nil
+}
+
+// About gets quota information
+func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
+	opts := rest.Opts{
+		Method:      "POST",
+		Path:        "/user/info.cgi",
+		ContentType: "application/json",
+	}
+	var accountInfo AccountInfo
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.rest.CallJSON(ctx, &opts, nil, &accountInfo)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read user info: %w", err)
+	}
+
+	// FIXME max upload size would be useful to use in Update
+	usage = &fs.Usage{
+		Used:  fs.NewUsageValue(accountInfo.ColdStorage),                                    // bytes in use
+		Total: fs.NewUsageValue(accountInfo.AvailableColdStorage),                           // bytes total
+		Free:  fs.NewUsageValue(accountInfo.AvailableColdStorage - accountInfo.ColdStorage), // bytes free
+	}
+	return usage, nil
+}
+
+// PublicLink adds a "readable by anyone with link" permission on the given file or folder.
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
+	o, err := f.NewObject(ctx, remote)
+	if err != nil {
+		return "", err
+	}
+	return o.(*Object).file.URL, nil
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs              = (*Fs)(nil)
+	_ fs.Mover           = (*Fs)(nil)
+	_ fs.Copier          = (*Fs)(nil)
+	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.PutUncheckeder  = (*Fs)(nil)
 	_ dircache.DirCacher = (*Fs)(nil)
 )

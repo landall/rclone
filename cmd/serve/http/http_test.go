@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"flag"
 	"io/ioutil"
 	"net/http"
@@ -9,10 +10,10 @@ import (
 	"time"
 
 	_ "github.com/rclone/rclone/backend/local"
-	"github.com/rclone/rclone/cmd/serve/httplib"
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/rclone/rclone/fs/filter"
+	httplib "github.com/rclone/rclone/lib/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,14 +26,19 @@ var (
 
 const (
 	testBindAddress = "localhost:0"
+	testTemplate    = "testdata/golden/testindex.html"
 )
 
 func startServer(t *testing.T, f fs.Fs) {
 	opt := httplib.DefaultOpt
 	opt.ListenAddr = testBindAddress
-	httpServer = newServer(f, &opt)
-	assert.NoError(t, httpServer.Serve())
-	testURL = httpServer.Server.URL()
+	httpServer = newServer(f, testTemplate)
+	router, err := httplib.Router()
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	httpServer.Bind(router)
+	testURL = httplib.URL()
 
 	// try to connect to the test server
 	pause := time.Millisecond
@@ -50,20 +56,32 @@ func startServer(t *testing.T, f fs.Fs) {
 
 }
 
+var (
+	datedObject  = "two.txt"
+	expectedTime = time.Date(2000, 1, 2, 3, 4, 5, 0, time.UTC)
+)
+
 func TestInit(t *testing.T) {
+	ctx := context.Background()
 	// Configure the remote
-	config.LoadConfig()
+	configfile.Install()
 	// fs.Config.LogLevel = fs.LogLevelDebug
 	// fs.Config.DumpHeaders = true
 	// fs.Config.DumpBodies = true
 
 	// exclude files called hidden.txt and directories called hidden
-	require.NoError(t, filter.Active.AddRule("- hidden.txt"))
-	require.NoError(t, filter.Active.AddRule("- hidden/**"))
+	fi := filter.GetConfig(ctx)
+	require.NoError(t, fi.AddRule("- hidden.txt"))
+	require.NoError(t, fi.AddRule("- hidden/**"))
 
 	// Create a test Fs
-	f, err := fs.NewFs("testdata/files")
+	f, err := fs.NewFs(context.Background(), "testdata/files")
 	require.NoError(t, err)
+
+	// set date of datedObject to expectedTime
+	obj, err := f.NewObject(context.Background(), datedObject)
+	require.NoError(t, err)
+	require.NoError(t, obj.SetModTime(context.Background(), expectedTime))
 
 	startServer(t, f)
 }
@@ -195,11 +213,22 @@ func TestGET(t *testing.T) {
 		body, err := ioutil.ReadAll(resp.Body)
 		require.NoError(t, err)
 
+		// Check we got a Last-Modified header and that it is a valid date
+		if test.Status == http.StatusOK || test.Status == http.StatusPartialContent {
+			lastModified := resp.Header.Get("Last-Modified")
+			assert.NotEqual(t, "", lastModified, test.Golden)
+			modTime, err := http.ParseTime(lastModified)
+			assert.NoError(t, err, test.Golden)
+			// check the actual date on our special file
+			if test.URL == datedObject {
+				assert.Equal(t, expectedTime, modTime, test.Golden)
+			}
+		}
+
 		checkGolden(t, test.Golden, body)
 	}
 }
 
 func TestFinalise(t *testing.T) {
-	httpServer.Close()
-	httpServer.Wait()
+	_ = httplib.Shutdown()
 }

@@ -1,15 +1,15 @@
 ---
 title: "Microsoft OneDrive"
 description: "Rclone docs for Microsoft OneDrive"
-date: "2015-10-14"
 ---
 
-<i class="fab fa-windows"></i> Microsoft OneDrive
------------------------------------------
+# {{< icon "fab fa-windows" >}} Microsoft OneDrive
 
 Paths are specified as `remote:path`
 
-Paths may be as deep as required, eg `remote:directory/subdirectory`.
+Paths may be as deep as required, e.g. `remote:directory/subdirectory`.
+
+## Configuration
 
 The initial setup for OneDrive involves getting a token from
 Microsoft which you need to do in your browser.  `rclone config` walks
@@ -118,7 +118,7 @@ To copy a local directory to an OneDrive directory called backup
 
     rclone copy /home/source remote:backup
 
-### Getting your own Client ID and Key ###
+### Getting your own Client ID and Key
 
 You can use your own Client ID if the default (`client_id` left blank)
 one doesn't work for you or you see lots of throttling. The default
@@ -128,16 +128,18 @@ requests.
 If you are having problems with them (E.g., seeing a lot of throttling), you can get your own
 Client ID and Key by following the steps below:
 
-1. Open https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade, then click `New registration`.
-2. Enter a name for your app, choose account type `Any Azure AD directory - Multitenant`, select `Web` in `Redirect URI` Enter `http://localhost:53682/` and click Register. Copy and keep the `Application (client) ID` under the app name for later use.
-3. Under `manage` select `Certificates & secrets`, click `New client secret`. Copy and keep that secret for later use.
+1. Open https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade and then click `New registration`.
+2. Enter a name for your app, choose account type `Accounts in any organizational directory (Any Azure AD directory - Multitenant) and personal Microsoft accounts (e.g. Skype, Xbox)`, select `Web` in `Redirect URI`, then type (do not copy and paste) `http://localhost:53682/` and click Register. Copy and keep the `Application (client) ID` under the app name for later use.
+3. Under `manage` select `Certificates & secrets`, click `New client secret`. Enter a description (can be anything) and set `Expires` to 24 months. Copy and keep that secret _Value_ for later use (you _won't_ be able to see this value afterwards).
 4. Under `manage` select `API permissions`, click `Add a permission` and select `Microsoft Graph` then select `delegated permissions`.
-5. Search and select the follwing permssions: `Files.Read`, `Files.ReadWrite`, `Files.Read.All`, `Files.ReadWrite.All`, `offline_access`, `User.Read`. Once selected click `Add permissions` at the bottom.
+5. Search and select the following permissions: `Files.Read`, `Files.ReadWrite`, `Files.Read.All`, `Files.ReadWrite.All`, `offline_access`, `User.Read`, and optionally `Sites.Read.All` (see below). Once selected click `Add permissions` at the bottom.
 
 Now the application is complete. Run `rclone config` to create or edit a OneDrive remote.
 Supply the app ID and password as Client ID and Secret, respectively. rclone will walk you through the remaining steps.
 
-### Modification time and hashes ###
+The `Sites.Read.All` permission is required if you need to [search SharePoint sites when configuring the remote](https://github.com/rclone/rclone/pull/5883). However, if that permission is not assigned, you need to set `disable_site_permission` option to true in the advanced options.
+
+### Modification time and hashes
 
 OneDrive allows modification times to be set on objects accurate to 1
 second.  These will be used to detect whether objects need syncing or
@@ -149,7 +151,7 @@ Sharepoint Server support
 
 For all types of OneDrive you can use the `--checksum` flag.
 
-### Restricted filename characters ###
+### Restricted filename characters
 
 In addition to the [default restricted characters set](/overview/#restricted-characters)
 the following characters are also replaced:
@@ -164,11 +166,9 @@ the following characters are also replaced:
 | ?         | 0x3F  | ？          |
 | \         | 0x5C  | ＼          |
 | \|        | 0x7C  | ｜          |
-| #         | 0x23  | ＃          |
-| %         | 0x25  | ％          |
 
 File names can also not end with the following characters.
-These only get replaced if they are last character in the name:
+These only get replaced if they are the last character in the name:
 
 | Character | Value | Replacement |
 | --------- |:-----:|:-----------:|
@@ -176,7 +176,7 @@ These only get replaced if they are last character in the name:
 | .         | 0x2E  | ．          |
 
 File names can also not begin with the following characters.
-These only get replaced if they are first character in the name:
+These only get replaced if they are the first character in the name:
 
 | Character | Value | Replacement |
 | --------- |:-----:|:-----------:|
@@ -186,92 +186,315 @@ These only get replaced if they are first character in the name:
 Invalid UTF-8 bytes will also be [replaced](/overview/#invalid-utf8),
 as they can't be used in JSON strings.
 
-### Deleting files ###
+### Deleting files
 
 Any files you delete with rclone will end up in the trash.  Microsoft
 doesn't provide an API to permanently delete files, nor to empty the
 trash, so you will have to do that with one of Microsoft's apps or via
 the OneDrive website.
 
-<!--- autogenerated options start - DO NOT EDIT, instead edit fs.RegInfo in backend/onedrive/onedrive.go then run make backenddocs -->
-### Standard Options
+{{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/onedrive/onedrive.go then run make backenddocs" >}}
+### Standard options
 
 Here are the standard options specific to onedrive (Microsoft OneDrive).
 
 #### --onedrive-client-id
 
-Microsoft App Client Id
+OAuth Client Id.
+
 Leave blank normally.
+
+Properties:
 
 - Config:      client_id
 - Env Var:     RCLONE_ONEDRIVE_CLIENT_ID
 - Type:        string
-- Default:     ""
+- Required:    false
 
 #### --onedrive-client-secret
 
-Microsoft App Client Secret
+OAuth Client Secret.
+
 Leave blank normally.
+
+Properties:
 
 - Config:      client_secret
 - Env Var:     RCLONE_ONEDRIVE_CLIENT_SECRET
 - Type:        string
-- Default:     ""
+- Required:    false
 
-### Advanced Options
+#### --onedrive-region
+
+Choose national cloud region for OneDrive.
+
+Properties:
+
+- Config:      region
+- Env Var:     RCLONE_ONEDRIVE_REGION
+- Type:        string
+- Default:     "global"
+- Examples:
+    - "global"
+        - Microsoft Cloud Global
+    - "us"
+        - Microsoft Cloud for US Government
+    - "de"
+        - Microsoft Cloud Germany
+    - "cn"
+        - Azure and Office 365 operated by 21Vianet in China
+
+### Advanced options
 
 Here are the advanced options specific to onedrive (Microsoft OneDrive).
+
+#### --onedrive-token
+
+OAuth Access Token as a JSON blob.
+
+Properties:
+
+- Config:      token
+- Env Var:     RCLONE_ONEDRIVE_TOKEN
+- Type:        string
+- Required:    false
+
+#### --onedrive-auth-url
+
+Auth server URL.
+
+Leave blank to use the provider defaults.
+
+Properties:
+
+- Config:      auth_url
+- Env Var:     RCLONE_ONEDRIVE_AUTH_URL
+- Type:        string
+- Required:    false
+
+#### --onedrive-token-url
+
+Token server url.
+
+Leave blank to use the provider defaults.
+
+Properties:
+
+- Config:      token_url
+- Env Var:     RCLONE_ONEDRIVE_TOKEN_URL
+- Type:        string
+- Required:    false
 
 #### --onedrive-chunk-size
 
 Chunk size to upload files with - must be multiple of 320k (327,680 bytes).
 
-Above this size files will be chunked - must be multiple of 320k (327,680 bytes). Note
-that the chunks will be buffered into memory.
+Above this size files will be chunked - must be multiple of 320k (327,680 bytes) and
+should not exceed 250M (262,144,000 bytes) else you may encounter \"Microsoft.SharePoint.Client.InvalidClientQueryException: The request message is too big.\"
+Note that the chunks will be buffered into memory.
+
+Properties:
 
 - Config:      chunk_size
 - Env Var:     RCLONE_ONEDRIVE_CHUNK_SIZE
 - Type:        SizeSuffix
-- Default:     10M
+- Default:     10Mi
 
 #### --onedrive-drive-id
 
-The ID of the drive to use
+The ID of the drive to use.
+
+Properties:
 
 - Config:      drive_id
 - Env Var:     RCLONE_ONEDRIVE_DRIVE_ID
 - Type:        string
-- Default:     ""
+- Required:    false
 
 #### --onedrive-drive-type
 
-The type of the drive ( personal | business | documentLibrary )
+The type of the drive (personal | business | documentLibrary).
+
+Properties:
 
 - Config:      drive_type
 - Env Var:     RCLONE_ONEDRIVE_DRIVE_TYPE
 - Type:        string
-- Default:     ""
+- Required:    false
+
+#### --onedrive-root-folder-id
+
+ID of the root folder.
+
+This isn't normally needed, but in special circumstances you might
+know the folder ID that you wish to access but not be able to get
+there through a path traversal.
+
+
+Properties:
+
+- Config:      root_folder_id
+- Env Var:     RCLONE_ONEDRIVE_ROOT_FOLDER_ID
+- Type:        string
+- Required:    false
+
+#### --onedrive-disable-site-permission
+
+Disable the request for Sites.Read.All permission.
+
+If set to true, you will no longer be able to search for a SharePoint site when
+configuring drive ID, because rclone will not request Sites.Read.All permission.
+Set it to true if your organization didn't assign Sites.Read.All permission to the
+application, and your organization disallows users to consent app permission
+request on their own.
+
+Properties:
+
+- Config:      disable_site_permission
+- Env Var:     RCLONE_ONEDRIVE_DISABLE_SITE_PERMISSION
+- Type:        bool
+- Default:     false
 
 #### --onedrive-expose-onenote-files
 
 Set to make OneNote files show up in directory listings.
 
-By default rclone will hide OneNote files in directory listings because
+By default, rclone will hide OneNote files in directory listings because
 operations like "Open" and "Update" won't work on them.  But this
 behaviour may also prevent you from deleting them.  If you want to
 delete OneNote files or otherwise want them to show up in directory
 listing, set this option.
+
+Properties:
 
 - Config:      expose_onenote_files
 - Env Var:     RCLONE_ONEDRIVE_EXPOSE_ONENOTE_FILES
 - Type:        bool
 - Default:     false
 
-<!--- autogenerated options stop -->
+#### --onedrive-server-side-across-configs
 
-### Limitations ###
+Allow server-side operations (e.g. copy) to work across different onedrive configs.
 
-#### Naming ####
+This will only work if you are copying between two OneDrive *Personal* drives AND
+the files to copy are already shared between them.  In other cases, rclone will
+fall back to normal copy (which will be slightly slower).
+
+Properties:
+
+- Config:      server_side_across_configs
+- Env Var:     RCLONE_ONEDRIVE_SERVER_SIDE_ACROSS_CONFIGS
+- Type:        bool
+- Default:     false
+
+#### --onedrive-list-chunk
+
+Size of listing chunk.
+
+Properties:
+
+- Config:      list_chunk
+- Env Var:     RCLONE_ONEDRIVE_LIST_CHUNK
+- Type:        int
+- Default:     1000
+
+#### --onedrive-no-versions
+
+Remove all versions on modifying operations.
+
+Onedrive for business creates versions when rclone uploads new files
+overwriting an existing one and when it sets the modification time.
+
+These versions take up space out of the quota.
+
+This flag checks for versions after file upload and setting
+modification time and removes all but the last version.
+
+**NB** Onedrive personal can't currently delete versions so don't use
+this flag there.
+
+
+Properties:
+
+- Config:      no_versions
+- Env Var:     RCLONE_ONEDRIVE_NO_VERSIONS
+- Type:        bool
+- Default:     false
+
+#### --onedrive-link-scope
+
+Set the scope of the links created by the link command.
+
+Properties:
+
+- Config:      link_scope
+- Env Var:     RCLONE_ONEDRIVE_LINK_SCOPE
+- Type:        string
+- Default:     "anonymous"
+- Examples:
+    - "anonymous"
+        - Anyone with the link has access, without needing to sign in.
+        - This may include people outside of your organization.
+        - Anonymous link support may be disabled by an administrator.
+    - "organization"
+        - Anyone signed into your organization (tenant) can use the link to get access.
+        - Only available in OneDrive for Business and SharePoint.
+
+#### --onedrive-link-type
+
+Set the type of the links created by the link command.
+
+Properties:
+
+- Config:      link_type
+- Env Var:     RCLONE_ONEDRIVE_LINK_TYPE
+- Type:        string
+- Default:     "view"
+- Examples:
+    - "view"
+        - Creates a read-only link to the item.
+    - "edit"
+        - Creates a read-write link to the item.
+    - "embed"
+        - Creates an embeddable link to the item.
+
+#### --onedrive-link-password
+
+Set the password for links created by the link command.
+
+At the time of writing this only works with OneDrive personal paid accounts.
+
+
+Properties:
+
+- Config:      link_password
+- Env Var:     RCLONE_ONEDRIVE_LINK_PASSWORD
+- Type:        string
+- Required:    false
+
+#### --onedrive-encoding
+
+The encoding for the backend.
+
+See the [encoding section in the overview](/overview/#encoding) for more info.
+
+Properties:
+
+- Config:      encoding
+- Env Var:     RCLONE_ONEDRIVE_ENCODING
+- Type:        MultiEncoder
+- Default:     Slash,LtGt,DoubleQuote,Colon,Question,Asterisk,Pipe,BackSlash,Del,Ctl,LeftSpace,LeftTilde,RightSpace,RightPeriod,InvalidUtf8,Dot
+
+{{< rem autogenerated options stop >}}
+
+## Limitations
+
+If you don't use rclone for 90 days the refresh token will
+expire. This will result in authorization problems. This is easy to
+fix by running the `rclone config reconnect remote:` command to get a
+new token and refresh token.
+
+### Naming
 
 Note that OneDrive is case insensitive so you can't have a
 file called "Hello.doc" and one called "hello.doc".
@@ -282,15 +505,15 @@ platforms they are common.  Rclone will map these names to and from an
 identical looking unicode equivalent.  For example if a file has a `?`
 in it will be mapped to `？` instead.
 
-#### File sizes ####
+### File sizes
 
-The largest allowed file sizes are 15GB for OneDrive for Business and 35GB for OneDrive Personal (Updated 4 Jan 2019).
+The largest allowed file size is 250 GiB for both OneDrive Personal and OneDrive for Business [(Updated 13 Jan 2021)](https://support.microsoft.com/en-us/office/invalid-file-names-and-file-types-in-onedrive-and-sharepoint-64883a5d-228e-48f5-b3d2-eb39e07630fa?ui=en-us&rs=en-us&ad=us#individualfilesize).
 
-#### Path length ####
+### Path length
 
 The entire path, including the file name, must contain fewer than 400 characters for OneDrive, OneDrive for Business and SharePoint Online. If you are encrypting file and folder names with rclone, you may want to pay attention to this limitation because the encrypted names are typically longer than the original ones.
 
-#### Number of files ####
+### Number of files
 
 OneDrive seems to be OK with at least 50,000 files in a folder, but at
 100,000 rclone will get errors listing the directory like `couldn’t
@@ -299,26 +522,47 @@ list files: UnknownError:`.  See
 
 An official document about the limitations for different types of OneDrive can be found [here](https://support.office.com/en-us/article/invalid-file-names-and-file-types-in-onedrive-onedrive-for-business-and-sharepoint-64883a5d-228e-48f5-b3d2-eb39e07630fa).
 
-### Versioning issue ###
+## Versions
 
-Every change in OneDrive causes the service to create a new version.
-This counts against a users quota.
-For example changing the modification time of a file creates a second
-version, so the file is using twice the space.
+Every change in a file OneDrive causes the service to create a new
+version of the the file.  This counts against a users quota.  For
+example changing the modification time of a file creates a second
+version, so the file apparently uses twice the space.
 
-The `copy` is the only rclone command affected by this as we copy
-the file and then afterwards set the modification time to match the
-source file.
+For example the `copy` command is affected by this as rclone copies
+the file and then afterwards sets the modification time to match the
+source file which uses another version.
 
-**Note**: Starting October 2018, users will no longer be able to disable versioning by default. This is because Microsoft has brought an [update](https://techcommunity.microsoft.com/t5/Microsoft-OneDrive-Blog/New-Updates-to-OneDrive-and-SharePoint-Team-Site-Versioning/ba-p/204390) to the mechanism. To change this new default setting, a PowerShell command is required to be run by a SharePoint admin. If you are an admin, you can run these commands in PowerShell to change that setting:
+You can use the `rclone cleanup` command (see below) to remove all old
+versions.
+
+Or you can set the `no_versions` parameter to `true` and rclone will
+remove versions after operations which create new versions. This takes
+extra transactions so only enable it if you need it.
+
+**Note** At the time of writing Onedrive Personal creates versions
+(but not for setting the modification time) but the API for removing
+them returns "API not found" so cleanup and `no_versions` should not
+be used on Onedrive Personal.
+
+### Disabling versioning
+
+Starting October 2018, users will no longer be able to
+disable versioning by default. This is because Microsoft has brought
+an
+[update](https://techcommunity.microsoft.com/t5/Microsoft-OneDrive-Blog/New-Updates-to-OneDrive-and-SharePoint-Team-Site-Versioning/ba-p/204390)
+to the mechanism. To change this new default setting, a PowerShell
+command is required to be run by a SharePoint admin. If you are an
+admin, you can run these commands in PowerShell to change that
+setting:
 
 1. `Install-Module -Name Microsoft.Online.SharePoint.PowerShell` (in case you haven't installed this already)
-1. `Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking`
-1. `Connect-SPOService -Url https://YOURSITE-admin.sharepoint.com -Credential YOU@YOURSITE.COM` (replacing `YOURSITE`, `YOU`, `YOURSITE.COM` with the actual values; this will prompt for your credentials)
-1. `Set-SPOTenant -EnableMinimumVersionRequirement $False`
-1. `Disconnect-SPOService` (to disconnect from the server)
+2. `Import-Module Microsoft.Online.SharePoint.PowerShell -DisableNameChecking`
+3. `Connect-SPOService -Url https://YOURSITE-admin.sharepoint.com -Credential YOU@YOURSITE.COM` (replacing `YOURSITE`, `YOU`, `YOURSITE.COM` with the actual values; this will prompt for your credentials)
+4. `Set-SPOTenant -EnableMinimumVersionRequirement $False`
+5. `Disconnect-SPOService` (to disconnect from the server)
 
-*Below are the steps for normal users to disable versioning. If you don't see the "No Versioning" option, make sure the above requirements are met.*  
+*Below are the steps for normal users to disable versioning. If you don't see the "No Versioning" option, make sure the above requirements are met.*
 
 User [Weropol](https://github.com/Weropol) has found a method to disable
 versioning on OneDrive
@@ -334,27 +578,58 @@ Note: This will disable the creation of new file versions, but will not remove a
 8. Use rclone to upload or modify files. (I also use the --no-update-modtime flag)
 9. Restore the versioning settings after using rclone. (Optional)
 
-### Troubleshooting ###
+## Cleanup
 
-#### Unexpected file size/hash differences on Sharepoint ####
+OneDrive supports `rclone cleanup` which causes rclone to look through
+every file under the path supplied and delete all version but the
+current version. Because this involves traversing all the files, then
+querying each file for versions it can be quite slow. Rclone does
+`--checkers` tests in parallel. The command also supports `-i` which
+is a great way to see what it would do.
+
+    rclone cleanup -i remote:path/subdir # interactively remove all old version for path/subdir
+    rclone cleanup remote:path/subdir    # unconditionally remove all old version for path/subdir
+
+**NB** Onedrive personal can't currently delete versions
+
+## Troubleshooting ##
+
+### Excessive throttling or blocked on SharePoint
+
+If you experience excessive throttling or is being blocked on SharePoint then it may help to set the user agent explicitly with a flag like this: `--user-agent "ISV|rclone.org|rclone/v1.55.1"`
+
+The specific details can be found in the Microsoft document: [Avoid getting throttled or blocked in SharePoint Online](https://docs.microsoft.com/en-us/sharepoint/dev/general-development/how-to-avoid-getting-throttled-or-blocked-in-sharepoint-online#how-to-decorate-your-http-traffic-to-avoid-throttling)
+
+### Unexpected file size/hash differences on Sharepoint ####
 
 It is a
 [known](https://github.com/OneDrive/onedrive-api-docs/issues/935#issuecomment-441741631)
 issue that Sharepoint (not OneDrive or OneDrive for Business) silently modifies
 uploaded files, mainly Office files (.docx, .xlsx, etc.), causing file size and
-hash checks to fail. To use rclone with such affected files on Sharepoint, you
+hash checks to fail. There are also other situations that will cause OneDrive to
+report inconsistent file sizes. To use rclone with such
+affected files on Sharepoint, you
 may disable these checks with the following command line arguments:
 
 ```
 --ignore-checksum --ignore-size
 ```
 
-#### Replacing/deleting existing files on Sharepoint gets "item not found" ####
+Alternatively, if you have write access to the OneDrive files, it may be possible
+to fix this problem for certain files, by attempting the steps below.
+Open the web interface for [OneDrive](https://onedrive.live.com) and find the
+affected files (which will be in the error messages/log for rclone). Simply click on
+each of these files, causing OneDrive to open them on the web. This will cause each
+file to be converted in place to a format that is functionally equivalent
+but which will no longer trigger the size discrepancy. Once all problematic files
+are converted you will no longer need the ignore options above.
+
+### Replacing/deleting existing files on Sharepoint gets "item not found" ####
 
 It is a [known](https://github.com/OneDrive/onedrive-api-docs/issues/1068) issue
 that Sharepoint (not OneDrive or OneDrive for Business) may return "item not
 found" errors when users try to replace or delete uploaded files; this seems to
-mainly affect Office files (.docx, .xlsx, etc.). As a workaround, you may use
+mainly affect Office files (.docx, .xlsx, etc.) and web files (.html, .aspx, etc.). As a workaround, you may use
 the `--backup-dir <BACKUP_DIR>` command line argument so rclone moves the
 files to be replaced/deleted into a given backup directory (instead of directly
 replacing/deleting them). For example, to instruct rclone to move the files into
@@ -364,7 +639,7 @@ the directory `rclone-backup-dir` on backend `mysharepoint`, you may use:
 --backup-dir mysharepoint:rclone-backup-dir
 ```
 
-#### access\_denied (AADSTS65005) ####
+### access\_denied (AADSTS65005) ####
 
 ```
 Error: access_denied
@@ -376,7 +651,7 @@ This means that rclone can't use the OneDrive for Business API with your account
 
 However, there are other ways to interact with your OneDrive account. Have a look at the webdav backend: https://rclone.org/webdav/#sharepoint
 
-#### invalid\_grant (AADSTS50076) ####
+### invalid\_grant (AADSTS50076) ####
 
 ```
 Error: invalid_grant
@@ -385,3 +660,12 @@ Description: Due to a configuration change made by your administrator, or becaus
 ```
 
 If you see the error above after enabling multi-factor authentication for your account, you can fix it by refreshing your OAuth refresh token. To do that, run `rclone config`, and choose to edit your OneDrive backend. Then, you don't need to actually make any changes until you reach this question: `Already have a token - refresh?`. For this question, answer `y` and go through the process to refresh your token, just like the first time the backend is configured. After this, rclone should work again for this backend.
+
+### Invalid request when making public links ####
+
+On Sharepoint and OneDrive for Business, `rclone link` may return an "Invalid
+request" error. A possible cause is that the organisation admin didn't allow
+public links to be made for the organisation/sharepoint library. To fix the
+permissions as an admin, take a look at the docs:
+[1](https://docs.microsoft.com/en-us/sharepoint/turn-external-sharing-on-or-off),
+[2](https://support.microsoft.com/en-us/office/set-up-and-manage-access-requests-94b26e0b-2822-49d4-929a-8455698654b3).

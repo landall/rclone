@@ -14,9 +14,9 @@ To work around this we use the remote "TestSugarSync:Test" to test with.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/sugarsync/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -76,50 +75,63 @@ func init() {
 		Name:        "sugarsync",
 		Description: "Sugarsync",
 		NewFs:       NewFs,
-		Config: func(name string, m configmap.Mapper) {
+		Config: func(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
 			opt := new(Options)
 			err := configstruct.Set(m, opt)
 			if err != nil {
-				log.Fatalf("Failed to read options: %v", err)
+				return nil, fmt.Errorf("failed to read options: %w", err)
 			}
 
-			if opt.RefreshToken != "" {
-				fmt.Printf("Already have a token - refresh?\n")
-				if !config.ConfirmWithConfig(m, "config_refresh_token", true) {
-					return
+			switch config.State {
+			case "":
+				if opt.RefreshToken == "" {
+					return fs.ConfigGoto("username")
 				}
-			}
-			fmt.Printf("Username (email address)> ")
-			username := config.ReadLine()
-			password := config.GetPassword("Your Sugarsync password is only required during setup and will not be stored.")
+				return fs.ConfigConfirm("refresh", true, "config_refresh", "Already have a token - refresh?")
+			case "refresh":
+				if config.Result == "false" {
+					return nil, nil
+				}
+				return fs.ConfigGoto("username")
+			case "username":
+				return fs.ConfigInput("password", "config_username", "username (email address)")
+			case "password":
+				m.Set("username", config.Result)
+				return fs.ConfigPassword("auth", "config_password", "Your Sugarsync password.\n\nOnly required during setup and will not be stored.")
+			case "auth":
+				username, _ := m.Get("username")
+				m.Set("username", "")
+				password := config.Result
 
-			authRequest := api.AppAuthorization{
-				Username:         username,
-				Password:         password,
-				Application:      withDefault(opt.AppID, appID),
-				AccessKeyID:      withDefault(opt.AccessKeyID, accessKeyID),
-				PrivateAccessKey: withDefault(opt.PrivateAccessKey, obscure.MustReveal(encryptedPrivateAccessKey)),
-			}
+				authRequest := api.AppAuthorization{
+					Username:         username,
+					Password:         obscure.MustReveal(password),
+					Application:      withDefault(opt.AppID, appID),
+					AccessKeyID:      withDefault(opt.AccessKeyID, accessKeyID),
+					PrivateAccessKey: withDefault(opt.PrivateAccessKey, obscure.MustReveal(encryptedPrivateAccessKey)),
+				}
 
-			var resp *http.Response
-			opts := rest.Opts{
-				Method: "POST",
-				Path:   "/app-authorization",
-			}
-			srv := rest.NewClient(fshttp.NewClient(fs.Config)).SetRoot(rootURL) //  FIXME
+				var resp *http.Response
+				opts := rest.Opts{
+					Method: "POST",
+					Path:   "/app-authorization",
+				}
+				srv := rest.NewClient(fshttp.NewClient(ctx)).SetRoot(rootURL) //  FIXME
 
-			// FIXME
-			//err = f.pacer.Call(func() (bool, error) {
-			resp, err = srv.CallXML(context.Background(), &opts, &authRequest, nil)
-			//	return shouldRetry(resp, err)
-			//})
-			if err != nil {
-				log.Fatalf("Failed to get token: %v", err)
+				// FIXME
+				//err = f.pacer.Call(func() (bool, error) {
+				resp, err = srv.CallXML(context.Background(), &opts, &authRequest, nil)
+				//	return shouldRetry(ctx, resp, err)
+				//})
+				if err != nil {
+					return nil, fmt.Errorf("failed to get token: %w", err)
+				}
+				opt.RefreshToken = resp.Header.Get("Location")
+				m.Set("refresh_token", opt.RefreshToken)
+				return nil, nil
 			}
-			opt.RefreshToken = resp.Header.Get("Location")
-			m.Set("refresh_token", opt.RefreshToken)
-		},
-		Options: []fs.Option{{
+			return nil, fmt.Errorf("unknown state %q", config.State)
+		}, Options: []fs.Option{{
 			Name: "app_id",
 			Help: "Sugarsync App ID.\n\nLeave blank to use rclone's.",
 		}, {
@@ -127,34 +139,34 @@ func init() {
 			Help: "Sugarsync Access Key ID.\n\nLeave blank to use rclone's.",
 		}, {
 			Name: "private_access_key",
-			Help: "Sugarsync Private Access Key\n\nLeave blank to use rclone's.",
+			Help: "Sugarsync Private Access Key.\n\nLeave blank to use rclone's.",
 		}, {
 			Name:    "hard_delete",
 			Help:    "Permanently delete files if true\notherwise put them in the deleted files.",
 			Default: false,
 		}, {
 			Name:     "refresh_token",
-			Help:     "Sugarsync refresh token\n\nLeave blank normally, will be auto configured by rclone.",
+			Help:     "Sugarsync refresh token.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
 			Name:     "authorization",
-			Help:     "Sugarsync authorization\n\nLeave blank normally, will be auto configured by rclone.",
+			Help:     "Sugarsync authorization.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
 			Name:     "authorization_expiry",
-			Help:     "Sugarsync authorization expiry\n\nLeave blank normally, will be auto configured by rclone.",
+			Help:     "Sugarsync authorization expiry.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
 			Name:     "user",
-			Help:     "Sugarsync user\n\nLeave blank normally, will be auto configured by rclone.",
+			Help:     "Sugarsync user.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
 			Name:     "root_id",
-			Help:     "Sugarsync root id\n\nLeave blank normally, will be auto configured by rclone.",
+			Help:     "Sugarsync root id.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
 			Name:     "deleted_id",
-			Help:     "Sugarsync deleted folder id\n\nLeave blank normally, will be auto configured by rclone.",
+			Help:     "Sugarsync deleted folder id.\n\nLeave blank normally, will be auto configured by rclone.",
 			Advanced: true,
 		}, {
 			Name:     config.ConfigEncoding,
@@ -230,7 +242,7 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
-// parsePath parses an sugarsync 'url'
+// parsePath parses a sugarsync 'url'
 func parsePath(path string) (root string) {
 	root = strings.Trim(path, "/")
 	return
@@ -248,14 +260,17 @@ var retryErrorCodes = []int{
 
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
-func shouldRetry(resp *http.Response, err error) (bool, error) {
+func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	if fserrors.ContextError(ctx, &err) {
+		return false, err
+	}
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
 }
 
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.File, err error) {
 	// defer fs.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
-	leaf, directoryID, err := f.dirCache.FindRootAndPath(ctx, path, false)
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, path, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
 			return nil, fs.ErrorObjectNotFound
@@ -264,7 +279,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.Fi
 	}
 
 	found, err := f.listAll(ctx, directoryID, func(item *api.File) bool {
-		if item.Name == leaf {
+		if strings.EqualFold(item.Name, leaf) {
 			info = item
 			return true
 		}
@@ -288,13 +303,13 @@ func (f *Fs) readMetaDataForID(ctx context.Context, ID string) (info *api.File, 
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, nil, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return nil, fs.ErrorObjectNotFound
 		}
-		return nil, errors.Wrap(err, "failed to get authorization")
+		return nil, fmt.Errorf("failed to get authorization: %w", err)
 	}
 	return info, nil
 }
@@ -325,10 +340,10 @@ func (f *Fs) getAuthToken(ctx context.Context) error {
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, &authRequest, &authResponse)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "failed to get authorization")
+		return fmt.Errorf("failed to get authorization: %w", err)
 	}
 	f.opt.Authorization = resp.Header.Get("Location")
 	f.authExpiry = authResponse.Expiration
@@ -350,7 +365,7 @@ func (f *Fs) getAuth(req *http.Request) (err error) {
 	// if have auth, check it is in date
 	if f.opt.Authorization == "" || f.opt.User == "" || f.authExpiry.IsZero() || time.Until(f.authExpiry) < expiryLeeway {
 		// Get the auth token
-		f.srv.SetSigner(nil) // temporariliy remove the signer so we don't infinitely recurse
+		f.srv.SetSigner(nil) // temporarily remove the signer so we don't infinitely recurse
 		err = f.getAuthToken(ctx)
 		f.srv.SetSigner(f.getAuth) // replace signer
 		if err != nil {
@@ -373,10 +388,10 @@ func (f *Fs) getUser(ctx context.Context) (user *api.User, err error) {
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, nil, &user)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get user")
+		return nil, fmt.Errorf("failed to get user: %w", err)
 	}
 	return user, nil
 }
@@ -395,9 +410,7 @@ func parseExpiry(expiryString string) time.Time {
 }
 
 // NewFs constructs an Fs from the path, container:path
-func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
-	ctx := context.Background()
-
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
 	if err != nil {
@@ -405,20 +418,20 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	root = parsePath(root)
-	client := fshttp.NewClient(fs.Config)
+	client := fshttp.NewClient(ctx)
 	f := &Fs{
 		name:       name,
 		root:       root,
 		opt:        *opt,
 		srv:        rest.NewClient(client).SetRoot(rootURL),
-		pacer:      fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		pacer:      fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		m:          m,
 		authExpiry: parseExpiry(opt.AuthorizationExpiry),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
 		CanHaveEmptyDirectories: true,
-	}).Fill(f)
+	}).Fill(ctx, f)
 	f.srv.SetSigner(f.getAuth) // use signing hook to get the auth
 	f.srv.SetErrorHandler(errorHandler)
 
@@ -432,7 +445,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		if strings.HasSuffix(f.opt.RootID, "/contents") {
 			f.opt.RootID = f.opt.RootID[:len(f.opt.RootID)-9]
 		} else {
-			return nil, errors.Errorf("unexpected rootID %q", f.opt.RootID)
+			return nil, fmt.Errorf("unexpected rootID %q", f.opt.RootID)
 		}
 		// Cache the results
 		f.m.Set("root_id", f.opt.RootID)
@@ -484,13 +497,13 @@ var findError = regexp.MustCompile(`<h3>(.*?)</h3>`)
 func errorHandler(resp *http.Response) (err error) {
 	body, err := rest.ReadBody(resp)
 	if err != nil {
-		return errors.Wrap(err, "error reading error out of body")
+		return fmt.Errorf("error reading error out of body: %w", err)
 	}
 	match := findError.FindSubmatch(body)
 	if match == nil || len(match) < 2 || len(match[1]) == 0 {
-		return errors.Errorf("HTTP error %v (%v) returned body: %q", resp.StatusCode, resp.Status, body)
+		return fmt.Errorf("HTTP error %v (%v) returned body: %q", resp.StatusCode, resp.Status, body)
 	}
-	return errors.Errorf("HTTP error %v (%v): %s", resp.StatusCode, resp.Status, match[1])
+	return fmt.Errorf("HTTP error %v (%v): %s", resp.StatusCode, resp.Status, match[1])
 }
 
 // rootSlash returns root with a slash on if it is empty, otherwise empty string
@@ -533,7 +546,7 @@ func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut strin
 	//fs.Debugf(f, "FindLeaf(%q, %q)", pathID, leaf)
 	// Find the leaf in pathID
 	found, err = f.listAll(ctx, pathID, nil, func(item *api.Collection) bool {
-		if item.Name == leaf {
+		if strings.EqualFold(item.Name, leaf) {
 			pathIDOut = item.Ref
 			return true
 		}
@@ -569,21 +582,21 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, mkdir, nil)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return "", err
 	}
 	newID = resp.Header.Get("Location")
 	if newID == "" {
-		// look up ID if not returned (eg for syncFolder)
+		// look up ID if not returned (e.g. for syncFolder)
 		var found bool
 		newID, found, err = f.FindLeaf(ctx, pathID, leaf)
 		if err != nil {
 			return "", err
 		}
 		if !found {
-			return "", errors.Errorf("couldn't find ID for newly created directory %q", leaf)
+			return "", fmt.Errorf("couldn't find ID for newly created directory %q", leaf)
 		}
 
 	}
@@ -620,10 +633,10 @@ OUTER:
 		var resp *http.Response
 		err = f.pacer.Call(func() (bool, error) {
 			resp, err = f.srv.CallXML(ctx, &opts, nil, &result)
-			return shouldRetry(resp, err)
+			return shouldRetry(ctx, resp, err)
 		})
 		if err != nil {
-			return found, errors.Wrap(err, "couldn't list files")
+			return found, fmt.Errorf("couldn't list files: %w", err)
 		}
 		if fileFn != nil {
 			for i := range result.Files {
@@ -663,10 +676,6 @@ OUTER:
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	err = f.dirCache.FindRoot(ctx, false)
-	if err != nil {
-		return nil, err
-	}
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
 		return nil, err
@@ -709,7 +718,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
 	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err = f.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err = f.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
 		return
 	}
@@ -733,7 +742,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		return existingObj, existingObj.Update(ctx, in, src, options...)
 	case fs.ErrorObjectNotFound:
 		// Not found so create it
-		return f.PutUnchecked(ctx, in, src)
+		return f.PutUnchecked(ctx, in, src, options...)
 	default:
 		return nil, err
 	}
@@ -765,13 +774,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 
 // Mkdir creates the container if it doesn't exist
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	err := f.dirCache.FindRoot(ctx, true)
-	if err != nil {
-		return err
-	}
-	if dir != "" {
-		_, err = f.dirCache.FindDir(ctx, dir, true)
-	}
+	_, err := f.dirCache.FindDir(ctx, dir, true)
 	return err
 }
 
@@ -786,7 +789,7 @@ func (f *Fs) delete(ctx context.Context, isFile bool, id string, remote string, 
 		}
 		return f.pacer.Call(func() (bool, error) {
 			resp, err := f.srv.Call(ctx, &opts)
-			return shouldRetry(resp, err)
+			return shouldRetry(ctx, resp, err)
 		})
 	}
 	// Move file/dir to deleted files if not hard delete
@@ -807,10 +810,6 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		return errors.New("can't purge root directory")
 	}
 	dc := f.dirCache
-	err := dc.FindRoot(ctx, false)
-	if err != nil {
-		return err
-	}
 	directoryID, err := dc.FindDir(ctx, dir, false)
 	if err != nil {
 		return err
@@ -851,7 +850,7 @@ func (f *Fs) Precision() time.Duration {
 	return fs.ModTimeNotSupported
 }
 
-// Copy src to this remote using server side copy operations.
+// Copy src to this remote using server-side copy operations.
 //
 // This is stored with the remote path given
 //
@@ -874,7 +873,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	srcPath := srcObj.fs.rootSlash() + srcObj.remote
 	dstPath := f.rootSlash() + remote
 	if strings.ToLower(srcPath) == strings.ToLower(dstPath) {
-		return nil, errors.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
+		return nil, fmt.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 	}
 
 	// Create temporary object
@@ -896,7 +895,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, &copyFile, nil)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
@@ -909,12 +908,12 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return dstObj, nil
 }
 
-// Purge deletes all the files and the container
+// Purge deletes all the files in the directory
 //
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
+func (f *Fs) Purge(ctx context.Context, dir string) error {
 	// Caution: Deleting a folder may orphan objects. It's important
 	// to remove the contents of the folder before you delete the
 	// folder. That's because removing a folder using DELETE does not
@@ -934,10 +933,10 @@ func (f *Fs) Purge(ctx context.Context) error {
 	if f.opt.HardDelete {
 		return fs.ErrorCantPurge
 	}
-	return f.purgeCheck(ctx, "", false)
+	return f.purgeCheck(ctx, dir, false)
 }
 
-// moveFile moves a file server side
+// moveFile moves a file server-side
 func (f *Fs) moveFile(ctx context.Context, id, leaf, directoryID string) (info *api.File, err error) {
 	opts := rest.Opts{
 		Method:  "PUT",
@@ -950,7 +949,7 @@ func (f *Fs) moveFile(ctx context.Context, id, leaf, directoryID string) (info *
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, &move, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
@@ -965,7 +964,7 @@ func (f *Fs) moveFile(ctx context.Context, id, leaf, directoryID string) (info *
 	return info, nil
 }
 
-// moveDir moves a folder server side
+// moveDir moves a folder server-side
 func (f *Fs) moveDir(ctx context.Context, id, leaf, directoryID string) (err error) {
 	// Move the object
 	opts := rest.Opts{
@@ -980,11 +979,11 @@ func (f *Fs) moveDir(ctx context.Context, id, leaf, directoryID string) (err err
 	var resp *http.Response
 	return f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, &move, nil)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 }
 
-// Move src to this remote using server side move operations.
+// Move src to this remote using server-side move operations.
 //
 // This is stored with the remote path given
 //
@@ -1020,7 +1019,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 }
 
 // DirMove moves src, srcRemote to this remote at dstRemote
-// using server side move operations.
+// using server-side move operations.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1033,64 +1032,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		fs.Debugf(srcFs, "Can't move directory - not same remote type")
 		return fs.ErrorCantDirMove
 	}
-	srcPath := path.Join(srcFs.root, srcRemote)
-	dstPath := path.Join(f.root, dstRemote)
 
-	// Refuse to move to or from the root
-	if srcPath == "" || dstPath == "" {
-		fs.Debugf(src, "DirMove error: Can't move root")
-		return errors.New("can't move root directory")
-	}
-
-	// find the root src directory
-	err := srcFs.dirCache.FindRoot(ctx, false)
-	if err != nil {
-		return err
-	}
-
-	// find the root dst directory
-	if dstRemote != "" {
-		err = f.dirCache.FindRoot(ctx, true)
-		if err != nil {
-			return err
-		}
-	} else {
-		if f.dirCache.FoundRoot() {
-			return fs.ErrorDirExists
-		}
-	}
-
-	// Find ID of dst parent, creating subdirs if necessary
-	var leaf, directoryID string
-	findPath := dstRemote
-	if dstRemote == "" {
-		findPath = f.root
-	}
-	leaf, directoryID, err = f.dirCache.FindPath(ctx, findPath, true)
-	if err != nil {
-		return err
-	}
-
-	// Check destination does not exist
-	if dstRemote != "" {
-		_, err = f.dirCache.FindDir(ctx, dstRemote, false)
-		if err == fs.ErrorDirNotFound {
-			// OK
-		} else if err != nil {
-			return err
-		} else {
-			return fs.ErrorDirExists
-		}
-	}
-
-	// Find ID of src
-	srcID, err := srcFs.dirCache.FindDir(ctx, srcRemote, false)
+	srcID, _, _, dstDirectoryID, dstLeaf, err := f.dirCache.DirMove(ctx, srcFs.dirCache, srcFs.root, srcRemote, f.root, dstRemote)
 	if err != nil {
 		return err
 	}
 
 	// Do the move
-	err = f.moveDir(ctx, srcID, leaf, directoryID)
+	err = f.moveDir(ctx, srcID, dstLeaf, dstDirectoryID)
 	if err != nil {
 		return err
 	}
@@ -1099,7 +1048,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 }
 
 // PublicLink adds a "readable by anyone with link" permission on the given file or folder.
-func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
 	obj, err := f.NewObject(ctx, remote)
 	if err != nil {
 		return "", err
@@ -1119,7 +1068,7 @@ func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
 	var info *api.File
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, &linkFile, &info)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return "", err
@@ -1248,7 +1197,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
@@ -1270,7 +1219,7 @@ func (f *Fs) createFile(ctx context.Context, pathID, leaf, mimeType string) (new
 	}
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallXML(ctx, &opts, &mkdir, nil)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return "", err
@@ -1289,7 +1238,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	remote := o.Remote()
 
 	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err := o.fs.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err := o.fs.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
 		return err
 	}
@@ -1298,7 +1247,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if o.id == "" {
 		o.id, err = o.fs.createFile(ctx, directoryID, leaf, fs.MimeType(ctx, src))
 		if err != nil {
-			return errors.Wrap(err, "failed to create file")
+			return fmt.Errorf("failed to create file: %w", err)
 		}
 		if o.id == "" {
 			return errors.New("failed to create file: no ID")
@@ -1320,6 +1269,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		RootURL:    o.id,
 		Path:       "/data",
 		NoResponse: true,
+		Options:    options,
 		Body:       in,
 	}
 	if size >= 0 {
@@ -1327,10 +1277,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(resp, err)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "failed to upload file")
+		return fmt.Errorf("failed to upload file: %w", err)
 	}
 
 	o.hasMetaData = false

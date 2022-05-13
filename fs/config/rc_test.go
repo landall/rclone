@@ -7,6 +7,7 @@ import (
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,8 @@ import (
 const testName = "configTestNameForRc"
 
 func TestRc(t *testing.T) {
+	ctx := context.Background()
+	configfile.Install()
 	// Create the test remote
 	call := rc.Calls.Get("config/create")
 	assert.NotNil(t, call)
@@ -26,7 +29,7 @@ func TestRc(t *testing.T) {
 			"test_key": "sausage",
 		},
 	}
-	out, err := call.Fn(context.Background(), in)
+	out, err := call.Fn(ctx, in)
 	require.NoError(t, err)
 	require.Nil(t, out)
 	assert.Equal(t, "local", config.FileGet(testName, "type"))
@@ -101,11 +104,12 @@ func TestRc(t *testing.T) {
 	t.Run("Password", func(t *testing.T) {
 		call := rc.Calls.Get("config/password")
 		assert.NotNil(t, call)
+		pw2 := obscure.MustObscure("password")
 		in := rc.Params{
 			"name": testName,
 			"parameters": rc.Params{
 				"test_key":  "rutabaga",
-				"test_key2": "cabbage",
+				"test_key2": pw2, // check we encode an already encoded password
 			},
 		}
 		out, err := call.Fn(context.Background(), in)
@@ -114,7 +118,7 @@ func TestRc(t *testing.T) {
 
 		assert.Equal(t, "local", config.FileGet(testName, "type"))
 		assert.Equal(t, "rutabaga", obscure.MustReveal(config.FileGet(testName, "test_key")))
-		assert.Equal(t, "cabbage", obscure.MustReveal(config.FileGet(testName, "test_key2")))
+		assert.Equal(t, pw2, obscure.MustReveal(config.FileGet(testName, "test_key2")))
 	})
 
 	// Delete the test remote

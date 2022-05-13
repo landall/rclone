@@ -1,14 +1,9 @@
 // Build for mount for unsupported platforms to stop go complaining
 // about "no buildable Go source files "
 
-// Invert the build constraint: linux,go1.11 darwin,go1.11 freebsd,go1.11
-//
-// !((linux&&go1.11) || (darwin&&go1.11) || (freebsd&&go1.11))
-// == !(linux&&go1.11) && !(darwin&&go1.11) && !(freebsd&&go1.11))
-// == (!linux || !go1.11) && (!darwin || go1.11) && (!freebsd || !go1.11))
+// Invert the build constraint: linux freebsd
 
-// +build !linux !go1.11
-// +build !darwin !go1.11
-// +build !freebsd !go1.11
+//go:build !linux && !freebsd
+// +build !linux,!freebsd
 
 package mount

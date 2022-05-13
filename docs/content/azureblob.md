@@ -1,15 +1,15 @@
 ---
 title: "Microsoft Azure Blob Storage"
 description: "Rclone docs for Microsoft Azure Blob Storage"
-date: "2017-07-30"
 ---
 
-<i class="fab fa-windows"></i> Microsoft Azure Blob Storage
------------------------------------------
+# {{< icon "fab fa-windows" >}} Microsoft Azure Blob Storage
 
 Paths are specified as `remote:container` (or `remote:` for the `lsd`
-command.)  You may put subdirectories in too, eg
+command.)  You may put subdirectories in too, e.g.
 `remote:container/path/to/dir`.
+
+## Configuration
 
 Here is an example of making a Microsoft Azure Blob Storage
 configuration.  For a remote called `remote`.  First run:
@@ -19,7 +19,7 @@ configuration.  For a remote called `remote`.  First run:
 This will guide you through an interactive setup process:
 
 ```
-No remotes found - make a new one
+No remotes found, make a new one?
 n) New remote
 s) Set configuration password
 q) Quit config
@@ -66,20 +66,28 @@ List the contents of a container
 Sync `/home/local/directory` to the remote container, deleting any excess
 files in the container.
 
-    rclone sync /home/local/directory remote:container
+    rclone sync -i /home/local/directory remote:container
 
-### --fast-list ###
+### --fast-list
 
 This remote supports `--fast-list` which allows you to use fewer
 transactions in exchange for more memory. See the [rclone
 docs](/docs/#fast-list) for more details.
 
-### Modified time ###
+### Modified time
 
 The modified time is stored as metadata on the object with the `mtime`
 key.  It is stored using RFC3339 Format time with nanosecond
 precision.  The metadata is supplied during directory listings so
 there is no overhead to using it.
+
+### Performance
+
+When uploading large files, increasing the value of
+`--azureblob-upload-concurrency` will increase performance at the cost
+of using more memory. The default of 16 is set quite conservatively to
+use less memory. It maybe be necessary raise it to 64 or higher to
+fully utilize a 1 GBit/s link with a single file transfer.
 
 ### Restricted filename characters
 
@@ -92,7 +100,7 @@ the following characters are also replaced:
 | \         | 0x5C  | ＼           |
 
 File names can also not end with the following characters.
-These only get replaced if they are last character in the name:
+These only get replaced if they are the last character in the name:
 
 | Character | Value | Replacement |
 | --------- |:-----:|:-----------:|
@@ -101,11 +109,11 @@ These only get replaced if they are last character in the name:
 Invalid UTF-8 bytes will also be [replaced](/overview/#invalid-utf8),
 as they can't be used in JSON strings.
 
-### Hashes ###
+### Hashes
 
 MD5 hashes are stored with blobs.  However blobs that were uploaded in
 chunks only have an MD5 if the source remote was capable of MD5
-hashes, eg the local disk.
+hashes, e.g. the local disk.
 
 ### Authenticating with Azure Blob Storage
 
@@ -113,127 +121,245 @@ Rclone has 3 ways of authenticating with Azure Blob Storage:
 
 #### Account and Key
 
-This is the most straight forward and least flexible way.  Just fill in the `account` and `key` lines and leave the rest blank.
+This is the most straight forward and least flexible way.  Just fill
+in the `account` and `key` lines and leave the rest blank.
 
 #### SAS URL
 
-This can be an account level SAS URL or container level SAS URL
+This can be an account level SAS URL or container level SAS URL.
 
-To use it leave `account`, `key`  blank and fill in `sas_url`.
+To use it leave `account`, `key` blank and fill in `sas_url`.
 
-Account level SAS URL or container level SAS URL can be obtained from Azure portal or Azure Storage Explorer.
-To get a container level SAS URL right click on a container in the Azure Blob explorer in the Azure portal.
+An account level SAS URL or container level SAS URL can be obtained
+from the Azure portal or the Azure Storage Explorer.  To get a
+container level SAS URL right click on a container in the Azure Blob
+explorer in the Azure portal.
 
-If You use container level SAS URL, rclone operations are permitted only on particular container, eg
+If you use a container level SAS URL, rclone operations are permitted
+only on a particular container, e.g.
 
-    rclone ls azureblob:container or rclone ls azureblob:
+    rclone ls azureblob:container
 
-Since container name already exists in SAS URL, you can leave it empty as well.
+You can also list the single container from the root. This will only
+show the container specified by the SAS URL.
 
-However these will not work
+    $ rclone lsd azureblob:
+    container/
 
-    rclone lsd azureblob:
+Note that you can't see or access any other containers - this will
+fail
+
     rclone ls azureblob:othercontainer
 
-This would be useful for temporarily allowing third parties access to a single container or putting credentials into an untrusted environment.
+Container level SAS URLs are useful for temporarily allowing third
+parties access to a single container or putting credentials into an
+untrusted environment such as a CI build server.
 
-### Multipart uploads ###
-
-Rclone supports multipart uploads with Azure Blob storage.  Files
-bigger than 256MB will be uploaded using chunked upload by default.
-
-The files will be uploaded in parallel in 4MB chunks (by default).
-Note that these chunks are buffered in memory and there may be up to
-`--transfers` of them being uploaded at once.
-
-Files can't be split into more than 50,000 chunks so by default, so
-the largest file that can be uploaded with 4MB chunk size is 195GB.
-Above this rclone will double the chunk size until it creates less
-than 50,000 chunks.  By default this will mean a maximum file size of
-3.2TB can be uploaded.  This can be raised to 5TB using
-`--azureblob-chunk-size 100M`.
-
-Note that rclone doesn't commit the block list until the end of the
-upload which means that there is a limit of 9.5TB of multipart uploads
-in progress as Azure won't allow more than that amount of uncommitted
-blocks.
-
-<!--- autogenerated options start - DO NOT EDIT, instead edit fs.RegInfo in backend/azureblob/azureblob.go then run make backenddocs -->
-### Standard Options
+{{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/azureblob/azureblob.go then run make backenddocs" >}}
+### Standard options
 
 Here are the standard options specific to azureblob (Microsoft Azure Blob Storage).
 
 #### --azureblob-account
 
-Storage Account Name (leave blank to use SAS URL or Emulator)
+Storage Account Name.
+
+Leave blank to use SAS URL or Emulator.
+
+Properties:
 
 - Config:      account
 - Env Var:     RCLONE_AZUREBLOB_ACCOUNT
 - Type:        string
-- Default:     ""
+- Required:    false
+
+#### --azureblob-service-principal-file
+
+Path to file containing credentials for use with a service principal.
+
+Leave blank normally. Needed only if you want to use a service principal instead of interactive login.
+
+    $ az ad sp create-for-rbac --name "<name>" \
+      --role "Storage Blob Data Owner" \
+      --scopes "/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.Storage/storageAccounts/<storage-account>/blobServices/default/containers/<container>" \
+      > azure-principal.json
+
+See ["Create an Azure service principal"](https://docs.microsoft.com/en-us/cli/azure/create-an-azure-service-principal-azure-cli) and ["Assign an Azure role for access to blob data"](https://docs.microsoft.com/en-us/azure/storage/common/storage-auth-aad-rbac-cli) pages for more details.
+
+
+Properties:
+
+- Config:      service_principal_file
+- Env Var:     RCLONE_AZUREBLOB_SERVICE_PRINCIPAL_FILE
+- Type:        string
+- Required:    false
 
 #### --azureblob-key
 
-Storage Account Key (leave blank to use SAS URL or Emulator)
+Storage Account Key.
+
+Leave blank to use SAS URL or Emulator.
+
+Properties:
 
 - Config:      key
 - Env Var:     RCLONE_AZUREBLOB_KEY
 - Type:        string
-- Default:     ""
+- Required:    false
 
 #### --azureblob-sas-url
 
-SAS URL for container level access only
-(leave blank if using account/key or Emulator)
+SAS URL for container level access only.
+
+Leave blank if using account/key or Emulator.
+
+Properties:
 
 - Config:      sas_url
 - Env Var:     RCLONE_AZUREBLOB_SAS_URL
 - Type:        string
-- Default:     ""
+- Required:    false
+
+#### --azureblob-use-msi
+
+Use a managed service identity to authenticate (only works in Azure).
+
+When true, use a [managed service identity](https://docs.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/)
+to authenticate to Azure Storage instead of a SAS token or account key.
+
+If the VM(SS) on which this program is running has a system-assigned identity, it will
+be used by default. If the resource has no system-assigned but exactly one user-assigned identity,
+the user-assigned identity will be used by default. If the resource has multiple user-assigned
+identities, the identity to use must be explicitly specified using exactly one of the msi_object_id,
+msi_client_id, or msi_mi_res_id parameters.
+
+Properties:
+
+- Config:      use_msi
+- Env Var:     RCLONE_AZUREBLOB_USE_MSI
+- Type:        bool
+- Default:     false
 
 #### --azureblob-use-emulator
 
-Uses local storage emulator if provided as 'true' (leave blank if using real azure storage endpoint)
+Uses local storage emulator if provided as 'true'.
+
+Leave blank if using real azure storage endpoint.
+
+Properties:
 
 - Config:      use_emulator
 - Env Var:     RCLONE_AZUREBLOB_USE_EMULATOR
 - Type:        bool
 - Default:     false
 
-### Advanced Options
+### Advanced options
 
 Here are the advanced options specific to azureblob (Microsoft Azure Blob Storage).
 
+#### --azureblob-msi-object-id
+
+Object ID of the user-assigned MSI to use, if any.
+
+Leave blank if msi_client_id or msi_mi_res_id specified.
+
+Properties:
+
+- Config:      msi_object_id
+- Env Var:     RCLONE_AZUREBLOB_MSI_OBJECT_ID
+- Type:        string
+- Required:    false
+
+#### --azureblob-msi-client-id
+
+Object ID of the user-assigned MSI to use, if any.
+
+Leave blank if msi_object_id or msi_mi_res_id specified.
+
+Properties:
+
+- Config:      msi_client_id
+- Env Var:     RCLONE_AZUREBLOB_MSI_CLIENT_ID
+- Type:        string
+- Required:    false
+
+#### --azureblob-msi-mi-res-id
+
+Azure resource ID of the user-assigned MSI to use, if any.
+
+Leave blank if msi_client_id or msi_object_id specified.
+
+Properties:
+
+- Config:      msi_mi_res_id
+- Env Var:     RCLONE_AZUREBLOB_MSI_MI_RES_ID
+- Type:        string
+- Required:    false
+
 #### --azureblob-endpoint
 
-Endpoint for the service
+Endpoint for the service.
+
 Leave blank normally.
+
+Properties:
 
 - Config:      endpoint
 - Env Var:     RCLONE_AZUREBLOB_ENDPOINT
 - Type:        string
-- Default:     ""
+- Required:    false
 
 #### --azureblob-upload-cutoff
 
-Cutoff for switching to chunked upload (<= 256MB).
+Cutoff for switching to chunked upload (<= 256 MiB) (deprecated).
+
+Properties:
 
 - Config:      upload_cutoff
 - Env Var:     RCLONE_AZUREBLOB_UPLOAD_CUTOFF
-- Type:        SizeSuffix
-- Default:     256M
+- Type:        string
+- Required:    false
 
 #### --azureblob-chunk-size
 
-Upload chunk size (<= 100MB).
+Upload chunk size.
 
 Note that this is stored in memory and there may be up to
-"--transfers" chunks stored at once in memory.
+"--transfers" * "--azureblob-upload-concurrency" chunks stored at once
+in memory.
+
+Properties:
 
 - Config:      chunk_size
 - Env Var:     RCLONE_AZUREBLOB_CHUNK_SIZE
 - Type:        SizeSuffix
-- Default:     4M
+- Default:     4Mi
+
+#### --azureblob-upload-concurrency
+
+Concurrency for multipart uploads.
+
+This is the number of chunks of the same file that are uploaded
+concurrently.
+
+If you are uploading small numbers of large files over high-speed
+links and these uploads do not fully utilize your bandwidth, then
+increasing this may help to speed up the transfers.
+
+In tests, upload speed increases almost linearly with upload
+concurrency. For example to fill a gigabit pipe it may be necessary to
+raise this to 64. Note that this will use more memory.
+
+Note that chunks are stored in memory and there may be up to
+"--transfers" * "--azureblob-upload-concurrency" chunks stored at once
+in memory.
+
+Properties:
+
+- Config:      upload_concurrency
+- Env Var:     RCLONE_AZUREBLOB_UPLOAD_CONCURRENCY
+- Type:        int
+- Default:     16
 
 #### --azureblob-list-chunk
 
@@ -246,6 +372,8 @@ minutes per megabyte on average, it will time out (
 [source](https://docs.microsoft.com/en-us/rest/api/storageservices/setting-timeouts-for-blob-service-operations#exceptions-to-default-timeout-interval)
 ). This can be used to limit the number of blobs items to return, to
 avoid the time out.
+
+Properties:
 
 - Config:      list_chunk
 - Env Var:     RCLONE_AZUREBLOB_LIST_CHUNK
@@ -267,20 +395,139 @@ If blobs are in "archive tier" at remote, trying to perform data transfer
 operations from remote will not be allowed. User should first restore by
 tiering blob to "Hot" or "Cool".
 
+Properties:
+
 - Config:      access_tier
 - Env Var:     RCLONE_AZUREBLOB_ACCESS_TIER
 - Type:        string
-- Default:     ""
+- Required:    false
 
-<!--- autogenerated options stop -->
+#### --azureblob-archive-tier-delete
 
-### Limitations ###
+Delete archive tier blobs before overwriting.
+
+Archive tier blobs cannot be updated. So without this flag, if you
+attempt to update an archive tier blob, then rclone will produce the
+error:
+
+    can't update archive tier blob without --azureblob-archive-tier-delete
+
+With this flag set then before rclone attempts to overwrite an archive
+tier blob, it will delete the existing blob before uploading its
+replacement.  This has the potential for data loss if the upload fails
+(unlike updating a normal blob) and also may cost more since deleting
+archive tier blobs early may be chargable.
+
+
+Properties:
+
+- Config:      archive_tier_delete
+- Env Var:     RCLONE_AZUREBLOB_ARCHIVE_TIER_DELETE
+- Type:        bool
+- Default:     false
+
+#### --azureblob-disable-checksum
+
+Don't store MD5 checksum with object metadata.
+
+Normally rclone will calculate the MD5 checksum of the input before
+uploading it so it can add it to metadata on the object. This is great
+for data integrity checking but can cause long delays for large files
+to start uploading.
+
+Properties:
+
+- Config:      disable_checksum
+- Env Var:     RCLONE_AZUREBLOB_DISABLE_CHECKSUM
+- Type:        bool
+- Default:     false
+
+#### --azureblob-memory-pool-flush-time
+
+How often internal memory buffer pools will be flushed.
+
+Uploads which requires additional buffers (f.e multipart) will use memory pool for allocations.
+This option controls how often unused buffers will be removed from the pool.
+
+Properties:
+
+- Config:      memory_pool_flush_time
+- Env Var:     RCLONE_AZUREBLOB_MEMORY_POOL_FLUSH_TIME
+- Type:        Duration
+- Default:     1m0s
+
+#### --azureblob-memory-pool-use-mmap
+
+Whether to use mmap buffers in internal memory pool.
+
+Properties:
+
+- Config:      memory_pool_use_mmap
+- Env Var:     RCLONE_AZUREBLOB_MEMORY_POOL_USE_MMAP
+- Type:        bool
+- Default:     false
+
+#### --azureblob-encoding
+
+The encoding for the backend.
+
+See the [encoding section in the overview](/overview/#encoding) for more info.
+
+Properties:
+
+- Config:      encoding
+- Env Var:     RCLONE_AZUREBLOB_ENCODING
+- Type:        MultiEncoder
+- Default:     Slash,BackSlash,Del,Ctl,RightPeriod,InvalidUtf8
+
+#### --azureblob-public-access
+
+Public access level of a container: blob or container.
+
+Properties:
+
+- Config:      public_access
+- Env Var:     RCLONE_AZUREBLOB_PUBLIC_ACCESS
+- Type:        string
+- Required:    false
+- Examples:
+    - ""
+        - The container and its blobs can be accessed only with an authorized request.
+        - It's a default value.
+    - "blob"
+        - Blob data within this container can be read via anonymous request.
+    - "container"
+        - Allow full public read access for container and blob data.
+
+#### --azureblob-no-head-object
+
+If set, do not do HEAD before GET when getting objects.
+
+Properties:
+
+- Config:      no_head_object
+- Env Var:     RCLONE_AZUREBLOB_NO_HEAD_OBJECT
+- Type:        bool
+- Default:     false
+
+{{< rem autogenerated options stop >}}
+
+## Limitations
 
 MD5 sums are only uploaded with chunked files if the source has an MD5
 sum.  This will always be the case for a local to azure copy.
 
-### Azure Storage Emulator Support ###
-You can test rlcone with storage emulator locally, to do this make sure azure storage emulator
+`rclone about` is not supported by the Microsoft Azure Blob storage backend. Backends without
+this capability cannot determine free space for an rclone mount or
+use policy `mfs` (most free space) as a member of an rclone union
+remote.
+
+See [List of backends that do not support rclone about](https://rclone.org/overview/#optional-features)
+See [rclone about](https://rclone.org/commands/rclone_about/)
+
+## Azure Storage Emulator Support
+
+You can test rclone with storage emulator locally, to do this make sure azure storage emulator
 installed locally and set up a new remote with `rclone config` follow instructions described in
 introduction, set `use_emulator` config as `true`, you do not need to provide default account name
 or key if using emulator.

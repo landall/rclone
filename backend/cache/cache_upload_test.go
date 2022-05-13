@@ -1,4 +1,5 @@
-// +build !plan9
+//go:build !plan9 && !js && !race
+// +build !plan9,!js,!race
 
 package cache_test
 

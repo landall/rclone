@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/rc"
@@ -72,7 +73,7 @@ See the [listremotes command](/commands/rclone_listremotes/) command for more in
 // Return the a list of remotes in the config file
 func rcListRemotes(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	var remotes = []string{}
-	for _, remote := range getConfigData().GetSectionList() {
+	for _, remote := range LoadedData().GetSectionList() {
 		remotes = append(remotes, remote)
 	}
 	out = rc.Params{
@@ -111,6 +112,17 @@ func init() {
 		if name == "create" {
 			extraHelp = "- type - type of the new remote\n"
 		}
+		if name == "create" || name == "update" {
+			extraHelp += `- opt - a dictionary of options to control the configuration
+    - obscure - declare passwords are plain and need obscuring
+    - noObscure - declare passwords are already obscured and don't need obscuring
+    - nonInteractive - don't interact with a user, return questions
+    - continue - continue the config process with an answer
+    - all - ask all the config questions not just the post config ones
+    - state - state to restart with - used with continue
+    - result - result to restart with - used with continue
+`
+		}
 		rc.Add(rc.Call{
 			Path:         "config/" + name,
 			AuthRequired: true,
@@ -118,7 +130,7 @@ func init() {
 				return rcConfig(ctx, in, name)
 			},
 			Title: name + " the config for a remote.",
-			Help: `This takes the following parameters
+			Help: `This takes the following parameters:
 
 - name - name of remote
 - parameters - a map of \{ "key": "value" \} pairs
@@ -140,19 +152,47 @@ func rcConfig(ctx context.Context, in rc.Params, what string) (out rc.Params, er
 	if err != nil {
 		return nil, err
 	}
+	var opt UpdateRemoteOpt
+	err = in.GetStruct("opt", &opt)
+	if err != nil && !rc.IsErrParamNotFound(err) {
+		return nil, err
+	}
+	// Backwards compatibility
+	if value, err := in.GetBool("obscure"); err == nil {
+		opt.Obscure = value
+	}
+	if value, err := in.GetBool("noObscure"); err == nil {
+		opt.NoObscure = value
+	}
+	var configOut *fs.ConfigOut
 	switch what {
 	case "create":
-		remoteType, err := in.GetString("type")
-		if err != nil {
-			return nil, err
+		remoteType, typeErr := in.GetString("type")
+		if typeErr != nil {
+			return nil, typeErr
 		}
-		return nil, CreateRemote(name, remoteType, parameters)
+		configOut, err = CreateRemote(ctx, name, remoteType, parameters, opt)
 	case "update":
-		return nil, UpdateRemote(name, parameters)
+		configOut, err = UpdateRemote(ctx, name, parameters, opt)
 	case "password":
-		return nil, PasswordRemote(name, parameters)
+		err = PasswordRemote(ctx, name, parameters)
+	default:
+		err = errors.New("unknown rcConfig type")
 	}
-	panic("unknown rcConfig type")
+	if err != nil {
+		return nil, err
+	}
+	if !opt.NonInteractive {
+		return nil, nil
+	}
+	if configOut == nil {
+		configOut = &fs.ConfigOut{}
+	}
+	err = rc.Reshape(&out, configOut)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func init() {

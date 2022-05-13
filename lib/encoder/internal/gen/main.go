@@ -1,5 +1,3 @@
-// +build go1.10
-
 package main
 
 import (
@@ -44,6 +42,8 @@ var maskBits = []struct {
 	{encoder.EncodeSingleQuote, "EncodeSingleQuote"},
 	{encoder.EncodeBackQuote, "EncodeBackQuote"},
 	{encoder.EncodeLtGt, "EncodeLtGt"},
+	{encoder.EncodeSquareBracket, "EncodeSquareBracket"},
+	{encoder.EncodeSemicolon, "EncodeSemicolon"},
 	{encoder.EncodeDollar, "EncodeDollar"},
 	{encoder.EncodeDoubleQuote, "EncodeDoubleQuote"},
 	{encoder.EncodeColon, "EncodeColon"},
@@ -106,6 +106,16 @@ var allMappings = []mapping{{
 		'<', '>',
 	}, []rune{
 		'＜', '＞',
+	}}, {
+	encoder.EncodeSquareBracket, []rune{
+		'[', ']',
+	}, []rune{
+		'［', '］',
+	}}, {
+	encoder.EncodeSemicolon, []rune{
+		';',
+	}, []rune{
+		'；',
 	}}, {
 	encoder.EncodeDoubleQuote, []rune{
 		'"',
@@ -602,7 +612,7 @@ func runePos(r rune, s []rune) int {
 	return -1
 }
 
-// quotedToString returns a string for the chars slice where a encoder.QuoteRune is
+// quotedToString returns a string for the chars slice where an encoder.QuoteRune is
 // inserted before a char[i] when quoted[i] is true.
 func quotedToString(chars []rune, quoted []bool) string {
 	var out strings.Builder
