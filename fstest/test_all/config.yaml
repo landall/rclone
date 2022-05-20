@@ -265,6 +265,9 @@ backends:
  - backend:  "box"
    remote:   "TestBox:"
    fastlist: false
+ - backend:  "baidupan"
+   remote:   "TestBaiduPan:"
+   fastlist: false
  - backend:  "fichier"
    remote:   "TestFichier:"
    fastlist: false
