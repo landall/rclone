@@ -1444,7 +1444,7 @@ func TestDirMove(t *testing.T) {
 	require.NoError(t, operations.DirMove(ctx, r.Fremote, "A1", "A2"))
 
 	for i := range files {
-		files[i].Path = strings.Replace(files[i].Path, "A1/", "A2/", -1)
+		files[i].Path = strings.ReplaceAll(files[i].Path, "A1/", "A2/")
 	}
 
 	fstest.CheckListingWithPrecision(
@@ -1469,7 +1469,7 @@ func TestDirMove(t *testing.T) {
 	require.NoError(t, operations.DirMove(ctx, r.Fremote, "A2", "A3"))
 
 	for i := range files {
-		files[i].Path = strings.Replace(files[i].Path, "A2/", "A3/", -1)
+		files[i].Path = strings.ReplaceAll(files[i].Path, "A2/", "A3/")
 	}
 
 	fstest.CheckListingWithPrecision(
