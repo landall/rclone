@@ -52,7 +52,7 @@ type Cache struct {
 	avFn       AddVirtualFn         // if set, can be called to add dir entries
 
 	mu            sync.Mutex       // protects the following variables
-	cond          *sync.Cond       // cond lock for synchronous cache cleaning
+	cond          sync.Cond        // cond lock for synchronous cache cleaning
 	item          map[string]*Item // files/directories in the cache
 	errItems      map[string]error // items in error state
 	used          int64            // total size of files in the cache
@@ -139,7 +139,7 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 
 	// Create a channel for cleaner to be kicked upon out of space con
 	c.kick = make(chan struct{}, 1)
-	c.cond = sync.NewCond(&c.mu)
+	c.cond = sync.Cond{L: &c.mu}
 
 	go c.cleaner(ctx)
 
@@ -339,7 +339,7 @@ func (c *Cache) get(name string) (item *Item, found bool) {
 
 // Item gets a cache item for name
 //
-// To use it item.Open will need to be called
+// To use it item.Open will need to be called.
 //
 // name should be a remote path not an osPath
 func (c *Cache) Item(name string) (item *Item) {
@@ -645,7 +645,7 @@ func (c *Cache) purgeClean(quota int64) {
 		}
 	}
 
-	// Resest outOfSpace without checking whether we have reduced cache space below the quota.
+	// Reset outOfSpace without checking whether we have reduced cache space below the quota.
 	// This allows some files to reduce their pendingAccesses count to allow them to be reset
 	// in the next iteration of the purge cleaner loop.
 
@@ -739,33 +739,23 @@ func (c *Cache) clean(kicked bool) {
 	oldItems, oldUsed := len(c.item), fs.SizeSuffix(c.used)
 	c.mu.Unlock()
 
-	// loop cleaning the cache until we reach below cache quota
-	for {
-		// Remove any files that are over age
-		c.purgeOld(c.opt.CacheMaxAge)
+	// Remove any files that are over age
+	c.purgeOld(c.opt.CacheMaxAge)
 
-		if int64(c.opt.CacheMaxSize) <= 0 {
-			break
-		}
-
-		// Now remove files not in use until cache size is below quota starting from the
-		// oldest first
+	// If have a maximum cache size...
+	if int64(c.opt.CacheMaxSize) > 0 {
+		// Remove files not in use until cache size is below quota starting from the oldest first
 		c.purgeOverQuota(int64(c.opt.CacheMaxSize))
 
 		// Remove cache files that are not dirty if we are still above the max cache size
 		c.purgeClean(int64(c.opt.CacheMaxSize))
 		c.retryFailedResets()
-
-		used := c.updateUsed()
-		if used <= int64(c.opt.CacheMaxSize) && len(c.errItems) == 0 {
-			break
-		}
 	}
 
 	// Was kicked?
 	if kicked {
 		c.kickerMu.Lock() // Make sure this is called with cache mutex unlocked
-		// Reenable io threads to kick me
+		// Re-enable io threads to kick me
 		c.cleanerKicked = false
 		c.kickerMu.Unlock()
 	}

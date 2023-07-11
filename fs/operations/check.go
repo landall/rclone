@@ -80,7 +80,7 @@ func (c *checkMarch) DstOnly(dst fs.DirEntry) (recurse bool) {
 		if c.opt.OneWay {
 			return false
 		}
-		err := fmt.Errorf("File not in %v", c.opt.Fsrc)
+		err := fmt.Errorf("file not in %v", c.opt.Fsrc)
 		fs.Errorf(dst, "%v", err)
 		_ = fs.CountError(err)
 		atomic.AddInt32(&c.differences, 1)
@@ -102,7 +102,7 @@ func (c *checkMarch) DstOnly(dst fs.DirEntry) (recurse bool) {
 func (c *checkMarch) SrcOnly(src fs.DirEntry) (recurse bool) {
 	switch src.(type) {
 	case fs.Object:
-		err := fmt.Errorf("File not in %v", c.opt.Fdst)
+		err := fmt.Errorf("file not in %v", c.opt.Fdst)
 		fs.Errorf(src, "%v", err)
 		_ = fs.CountError(err)
 		atomic.AddInt32(&c.differences, 1)
@@ -120,12 +120,12 @@ func (c *checkMarch) SrcOnly(src fs.DirEntry) (recurse bool) {
 // check to see if two objects are identical using the check function
 func (c *checkMarch) checkIdentical(ctx context.Context, dst, src fs.Object) (differ bool, noHash bool, err error) {
 	ci := fs.GetConfig(ctx)
-	tr := accounting.Stats(ctx).NewCheckingTransfer(src)
+	tr := accounting.Stats(ctx).NewCheckingTransfer(src, "checking")
 	defer func() {
 		tr.Done(ctx, err)
 	}()
 	if sizeDiffers(ctx, src, dst) {
-		err = fmt.Errorf("Sizes differ")
+		err = fmt.Errorf("sizes differ")
 		fs.Errorf(src, "%v", err)
 		return true, false, nil
 	}
@@ -219,11 +219,13 @@ func CheckFn(ctx context.Context, opt *CheckOpt) error {
 
 	// set up a march over fdst and fsrc
 	m := &march.March{
-		Ctx:      ctx,
-		Fdst:     c.opt.Fdst,
-		Fsrc:     c.opt.Fsrc,
-		Dir:      "",
-		Callback: c,
+		Ctx:                    ctx,
+		Fdst:                   c.opt.Fdst,
+		Fsrc:                   c.opt.Fsrc,
+		Dir:                    "",
+		Callback:               c,
+		NoTraverse:             ci.NoTraverse,
+		NoUnicodeNormalization: ci.NoUnicodeNormalization,
 	}
 	fs.Debugf(c.opt.Fdst, "Waiting for checks to finish")
 	err := m.Run(ctx)
@@ -333,7 +335,7 @@ func CheckIdenticalDownload(ctx context.Context, dst, src fs.Object) (differ boo
 
 // Does the work for CheckIdenticalDownload
 func checkIdenticalDownload(ctx context.Context, dst, src fs.Object) (differ bool, err error) {
-	in1, err := dst.Open(ctx)
+	in1, err := Open(ctx, dst)
 	if err != nil {
 		return true, fmt.Errorf("failed to open %q: %w", dst, err)
 	}
@@ -343,7 +345,7 @@ func checkIdenticalDownload(ctx context.Context, dst, src fs.Object) (differ boo
 	}()
 	in1 = tr1.Account(ctx, in1).WithBuffer() // account and buffer the transfer
 
-	in2, err := src.Open(ctx)
+	in2, err := Open(ctx, src)
 	if err != nil {
 		return true, fmt.Errorf("failed to open %q: %w", src, err)
 	}
@@ -422,7 +424,7 @@ func CheckSum(ctx context.Context, fsrc, fsum fs.Fs, sumFile string, hashType ha
 			continue
 		}
 		// filesystem missed the file, sum wasn't consumed
-		err := fmt.Errorf("File not in %v", opt.Fdst)
+		err := fmt.Errorf("file not in %v", opt.Fdst)
 		fs.Errorf(filename, "%v", err)
 		_ = fs.CountError(err)
 		if lastErr == nil {
@@ -448,7 +450,7 @@ func (c *checkMarch) checkSum(ctx context.Context, obj fs.Object, download bool,
 	}
 
 	var err error
-	tr := accounting.Stats(ctx).NewCheckingTransfer(obj)
+	tr := accounting.Stats(ctx).NewCheckingTransfer(obj, "hashing")
 	defer tr.Done(ctx, err)
 
 	if !sumFound {
@@ -481,7 +483,7 @@ func (c *checkMarch) checkSum(ctx context.Context, obj fs.Object, download bool,
 			<-c.tokens // get the token back to free up a slot
 			c.wg.Done()
 		}()
-		if in, err = obj.Open(ctx); err != nil {
+		if in, err = Open(ctx, obj); err != nil {
 			return
 		}
 		tr := accounting.Stats(ctx).NewTransfer(obj)
@@ -536,7 +538,7 @@ type HashSums map[string]string
 
 // ParseSumFile parses a hash SUM file and returns hashes as a map
 func ParseSumFile(ctx context.Context, sumFile fs.Object) (HashSums, error) {
-	rd, err := sumFile.Open(ctx)
+	rd, err := Open(ctx, sumFile)
 	if err != nil {
 		return nil, err
 	}

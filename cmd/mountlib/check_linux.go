@@ -22,7 +22,7 @@ const (
 // On Linux we use the OS-specific /proc/mount API so the check won't access the path.
 // Directories marked as "mounted" by autofs are considered not mounted.
 func CheckMountEmpty(mountpoint string) error {
-	const msg = "Directory already mounted, use --allow-non-empty to mount anyway: %s"
+	const msg = "directory already mounted, use --allow-non-empty to mount anyway: %s"
 
 	mountpointAbs, err := filepath.Abs(mountpoint)
 	if err != nil {
@@ -33,12 +33,20 @@ func CheckMountEmpty(mountpoint string) error {
 	if err != nil {
 		return fmt.Errorf("cannot read %s: %w", mtabPath, err)
 	}
+	foundAutofs := false
 	for _, entry := range entries {
-		if entry.Dir == mountpointAbs && entry.Type != "autofs" {
-			return fmt.Errorf(msg, mountpointAbs)
+		if entry.Dir == mountpointAbs {
+			if entry.Type != "autofs" {
+				return fmt.Errorf(msg, mountpointAbs)
+			}
+			foundAutofs = true
 		}
 	}
-	return nil
+	// It isn't safe to list an autofs in the middle of mounting
+	if foundAutofs {
+		return nil
+	}
+	return checkMountEmpty(mountpoint)
 }
 
 // CheckMountReady checks whether mountpoint is mounted by rclone.

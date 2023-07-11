@@ -7,7 +7,8 @@ import (
 // Help contains text describing file and directory caching to add to
 // the command help.
 // Warning: "!" (sic) will be replaced by backticks below,
-//          but the pipe character "|" can be used as is.
+//
+//	but the pipe character "|" can be used as is.
 var Help = strings.ReplaceAll(`
 ### VFS - Virtual File System
 
@@ -85,7 +86,7 @@ find that you need one or the other or both.
 
     --cache-dir string                   Directory rclone will use for caching.
     --vfs-cache-mode CacheMode           Cache mode off|minimal|writes|full (default off)
-    --vfs-cache-max-age duration         Max age of objects in the cache (default 1h0m0s)
+    --vfs-cache-max-age duration         Max time since last access of objects in the cache (default 1h0m0s)
     --vfs-cache-max-size SizeSuffix      Max total size of objects in the cache (default off)
     --vfs-cache-poll-interval duration   Interval to poll the cache for stale objects (default 1m0s)
     --vfs-write-back duration            Time to writeback files after last use when using cache (default 5s)
@@ -108,7 +109,18 @@ flags.
 If using !--vfs-cache-max-size! note that the cache may exceed this size
 for two reasons.  Firstly because it is only checked every
 !--vfs-cache-poll-interval!.  Secondly because open files cannot be
-evicted from the cache.
+evicted from the cache. When !--vfs-cache-max-size!
+is exceeded, rclone will attempt to evict the least accessed files
+from the cache first. rclone will start with files that haven't
+been accessed for the longest. This cache flushing strategy is
+efficient and more relevant files are likely to remain cached.
+
+The !--vfs-cache-max-age! will evict files from the cache
+after the set time since last access has passed. The default value of
+1 hour will start evicting files from cache that haven't been accessed
+for 1 hour. When a cached file is accessed the 1 hour timer is reset to 0
+and will wait for 1 more hour before evicting. Specify the time with
+standard notation, s, m, h, d, w .
 
 You **should not** run two copies of rclone using the same VFS cache
 with the same or overlapping remotes if using !--vfs-cache-mode > off!.
@@ -306,6 +318,13 @@ The flag controls whether "fixup" is performed to satisfy the target.
 If the flag is not provided on the command line, then its default value depends
 on the operating system where rclone runs: "true" on Windows and macOS, "false"
 otherwise. If the flag is provided without a value, then it is "true".
+
+### VFS Disk Options
+
+This flag allows you to manually set the statistics about the filing system.
+It can be useful when those statistics cannot be read correctly automatically.
+
+    --vfs-disk-space-total-size    Manually set the total disk space size (example: 256G, default: -1)
 
 ### Alternate report of used bytes
 

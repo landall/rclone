@@ -44,13 +44,22 @@ func TestJobsExpire(t *testing.T) {
 	jobs := newJobs()
 	jobs.opt.JobExpireInterval = time.Millisecond
 	assert.Equal(t, false, jobs.expireRunning)
+	var gotJobID int64
+	var gotJob *Job
 	job, out, err := jobs.NewJob(ctx, func(ctx context.Context, in rc.Params) (rc.Params, error) {
 		defer close(wait)
+		var ok bool
+		gotJobID, ok = GetJobID(ctx)
+		assert.True(t, ok)
+		gotJob, ok = GetJob(ctx)
+		assert.True(t, ok)
 		return in, nil
 	}, rc.Params{"_async": true})
 	require.NoError(t, err)
 	assert.Equal(t, 1, len(out))
 	<-wait
+	assert.Equal(t, job.ID, gotJobID, "check can get JobID from ctx")
+	assert.Equal(t, job, gotJob, "check can get Job from ctx")
 	assert.Equal(t, 1, len(jobs.jobs))
 	jobs.Expire()
 	assert.Equal(t, 1, len(jobs.jobs))
@@ -107,21 +116,17 @@ var shortFn = func(ctx context.Context, in rc.Params) (rc.Params, error) {
 }
 
 var ctxFn = func(ctx context.Context, in rc.Params) (rc.Params, error) {
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 var ctxParmFn = func(paramCtx context.Context, returnError bool) func(ctx context.Context, in rc.Params) (rc.Params, error) {
 	return func(ctx context.Context, in rc.Params) (rc.Params, error) {
-		select {
-		case <-paramCtx.Done():
-			if returnError {
-				return nil, ctx.Err()
-			}
-			return rc.Params{}, nil
+		<-paramCtx.Done()
+		if returnError {
+			return nil, ctx.Err()
 		}
+		return rc.Params{}, nil
 	}
 }
 
@@ -454,6 +459,48 @@ func TestRcSyncJobStop(t *testing.T) {
 	assert.Equal(t, "context canceled", out["error"])
 	assert.Equal(t, true, out["finished"])
 	assert.Equal(t, false, out["success"])
+}
+
+func TestRcJobStopGroup(t *testing.T) {
+	ctx := context.Background()
+	jobID = 0
+	_, _, err := NewJob(ctx, ctxFn, rc.Params{
+		"_async": true,
+		"_group": "myparty",
+	})
+	require.NoError(t, err)
+	_, _, err = NewJob(ctx, ctxFn, rc.Params{
+		"_async": true,
+		"_group": "myparty",
+	})
+	require.NoError(t, err)
+
+	call := rc.Calls.Get("job/stopgroup")
+	assert.NotNil(t, call)
+	in := rc.Params{"group": "myparty"}
+	out, err := call.Fn(context.Background(), in)
+	require.NoError(t, err)
+	require.Empty(t, out)
+
+	in = rc.Params{}
+	_, err = call.Fn(context.Background(), in)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Didn't find key")
+
+	time.Sleep(10 * time.Millisecond)
+
+	call = rc.Calls.Get("job/status")
+	assert.NotNil(t, call)
+	for i := 1; i <= 2; i++ {
+		in = rc.Params{"jobid": i}
+		out, err = call.Fn(context.Background(), in)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, "myparty", out["group"])
+		assert.Equal(t, "context canceled", out["error"])
+		assert.Equal(t, true, out["finished"])
+		assert.Equal(t, false, out["success"])
+	}
 }
 
 func TestOnFinish(t *testing.T) {

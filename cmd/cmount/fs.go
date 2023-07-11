@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -545,22 +546,41 @@ func (fsys *FS) Fsyncdir(path string, datasync bool, fh uint64) (errc int) {
 
 // Setxattr sets extended attributes.
 func (fsys *FS) Setxattr(path string, name string, value []byte, flags int) (errc int) {
+	defer log.Trace(path, "name=%q, value=%q, flags=%d", name, value, flags)("errc=%d", &errc)
 	return -fuse.ENOSYS
 }
 
 // Getxattr gets extended attributes.
 func (fsys *FS) Getxattr(path string, name string) (errc int, value []byte) {
+	defer log.Trace(path, "name=%q", name)("errc=%d, value=%q", &errc, &value)
 	return -fuse.ENOSYS, nil
 }
 
 // Removexattr removes extended attributes.
 func (fsys *FS) Removexattr(path string, name string) (errc int) {
+	defer log.Trace(path, "name=%q", name)("errc=%d", &errc)
 	return -fuse.ENOSYS
 }
 
 // Listxattr lists extended attributes.
 func (fsys *FS) Listxattr(path string, fill func(name string) bool) (errc int) {
+	defer log.Trace(path, "fill=%p", fill)("errc=%d", &errc)
 	return -fuse.ENOSYS
+}
+
+// Getpath allows a case-insensitive file system to report the correct case of
+// a file path.
+func (fsys *FS) Getpath(path string, fh uint64) (errc int, normalisedPath string) {
+	defer log.Trace(path, "Getpath fh=%d", fh)("errc=%d, normalisedPath=%q", &errc, &normalisedPath)
+	node, _, errc := fsys.getNode(path, fh)
+	if errc != 0 {
+		return errc, ""
+	}
+	normalisedPath = node.Path()
+	if !strings.HasPrefix("/", normalisedPath) {
+		normalisedPath = "/" + normalisedPath
+	}
+	return 0, normalisedPath
 }
 
 // Translate errors from mountlib
@@ -627,6 +647,7 @@ func translateOpenFlags(inFlags int) (outFlags int) {
 var (
 	_ fuse.FileSystemInterface = (*FS)(nil)
 	_ fuse.FileSystemOpenEx    = (*FS)(nil)
+	_ fuse.FileSystemGetpath   = (*FS)(nil)
 	//_ fuse.FileSystemChflags    = (*FS)(nil)
 	//_ fuse.FileSystemSetcrtime  = (*FS)(nil)
 	//_ fuse.FileSystemSetchgtime = (*FS)(nil)

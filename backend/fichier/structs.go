@@ -20,6 +20,7 @@ type DownloadRequest struct {
 	URL    string `json:"url"`
 	Single int    `json:"single"`
 	Pass   string `json:"pass,omitempty"`
+	CDN    int    `json:"cdn,omitempty"`
 }
 
 // RemoveFolderRequest is the request structure of the corresponding request
@@ -84,7 +85,7 @@ type CopyFileResponse struct {
 	URLs    []FileCopy `json:"urls"`
 }
 
-// FileCopy is used in the the CopyFileResponse
+// FileCopy is used in the CopyFileResponse
 type FileCopy struct {
 	FromURL string `json:"from_url"`
 	ToURL   string `json:"to_url"`

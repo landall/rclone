@@ -1,3 +1,4 @@
+// Package tree provides the tree command.
 package tree
 
 import (
@@ -17,6 +18,8 @@ import (
 	"github.com/rclone/rclone/fs/dirtree"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +28,7 @@ var (
 	outFileName string
 	noReport    bool
 	sort        string
+	enc         = encoder.OS
 )
 
 func init() {
@@ -60,7 +64,6 @@ func init() {
 	flags.StringVarP(cmdFlags, &sort, "sort", "", "", "Select sort: name,version,size,mtime,ctime")
 	// Graphics
 	flags.BoolVarP(cmdFlags, &opts.NoIndent, "noindent", "", false, "Don't print indentation lines")
-	flags.BoolVarP(cmdFlags, &opts.Colorize, "color", "C", false, "Turn colorization on always")
 }
 
 var commandDefinition = &cobra.Command{
@@ -84,29 +87,41 @@ For example
     1 directories, 5 files
 
 You can use any of the filtering options with the tree command (e.g.
---include and --exclude).  You can also use --fast-list.
+` + "`--include` and `--exclude`" + `.  You can also use ` + "`--fast-list`" + `.
 
 The tree command has many options for controlling the listing which
-are compatible with the tree command.  Note that not all of them have
+are compatible with the tree command, for example you can include file
+sizes with ` + "`--size`" + `.  Note that not all of them have
 short options as they conflict with rclone's short options.
+
+For a more interactive navigation of the remote see the
+[ncdu](/commands/rclone_ncdu/) command.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.38",
+	},
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(1, 1, command, args)
 		fsrc := cmd.NewFsSrc(args)
-		outFile := os.Stdout
+		ci := fs.GetConfig(context.Background())
+		var outFile io.Writer
 		if outFileName != "" {
 			var err error
 			outFile, err = os.Create(outFileName)
 			if err != nil {
-				return fmt.Errorf("failed to create output file: %v", err)
+				return fmt.Errorf("failed to create output file: %w", err)
 			}
+			opts.Colorize = false
+		} else {
+			terminal.Start()
+			outFile = terminal.Out
+			opts.Colorize = true
 		}
 		opts.VerSort = opts.VerSort || sort == "version"
 		opts.ModSort = opts.ModSort || sort == "mtime"
 		opts.CTimeSort = opts.CTimeSort || sort == "ctime"
 		opts.NameSort = sort == "name"
 		opts.SizeSort = sort == "size"
-		ci := fs.GetConfig(context.Background())
 		opts.UnitSize = ci.HumanReadable
 		if opts.DeepLevel == 0 {
 			opts.DeepLevel = ci.MaxDepth
@@ -150,7 +165,7 @@ type FileInfo struct {
 
 // Name is base name of the file
 func (to *FileInfo) Name() string {
-	return path.Base(to.entry.Remote())
+	return enc.FromStandardName(path.Base(to.entry.Remote()))
 }
 
 // Size in bytes for regular files; system-dependent for others
@@ -184,7 +199,7 @@ func (to *FileInfo) Sys() interface{} {
 
 // String returns the full path
 func (to *FileInfo) String() string {
-	return to.entry.Remote()
+	return filepath.FromSlash(enc.FromStandardPath(to.entry.Remote()))
 }
 
 // Fs maps an fs.Fs into a tree.Fs
@@ -199,13 +214,14 @@ func NewFs(dirs dirtree.DirTree) Fs {
 func (dirs Fs) Stat(filePath string) (fi os.FileInfo, err error) {
 	defer log.Trace(nil, "filePath=%q", filePath)("fi=%+v, err=%v", &fi, &err)
 	filePath = filepath.ToSlash(filePath)
+	filePath = enc.ToStandardPath(filePath)
 	filePath = strings.TrimLeft(filePath, "/")
 	if filePath == "" {
 		return &FileInfo{fs.NewDir("", time.Now())}, nil
 	}
 	_, entry := dirtree.DirTree(dirs).Find(filePath)
 	if entry == nil {
-		return nil, fmt.Errorf("Couldn't find %q in directory cache", filePath)
+		return nil, fmt.Errorf("couldn't find %q in directory cache", filePath)
 	}
 	return &FileInfo{entry}, nil
 }
@@ -214,13 +230,14 @@ func (dirs Fs) Stat(filePath string) (fi os.FileInfo, err error) {
 func (dirs Fs) ReadDir(dir string) (names []string, err error) {
 	defer log.Trace(nil, "dir=%s", dir)("names=%+v, err=%v", &names, &err)
 	dir = filepath.ToSlash(dir)
+	dir = enc.ToStandardPath(dir)
 	dir = strings.TrimLeft(dir, "/")
 	entries, ok := dirs[dir]
 	if !ok {
-		return nil, fmt.Errorf("Couldn't find directory %q", dir)
+		return nil, fmt.Errorf("couldn't find directory %q", dir)
 	}
 	for _, entry := range entries {
-		names = append(names, path.Base(entry.Remote()))
+		names = append(names, enc.FromStandardName(path.Base(entry.Remote())))
 	}
 	return
 }

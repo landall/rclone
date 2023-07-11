@@ -111,16 +111,22 @@ func Run() {
 //
 // It should be used in a defer statement normally so
 //
-//     defer OnError(&err, cancelFunc)()
+//	defer OnError(&err, cancelFunc)()
 //
 // So cancelFunc will be run if the function exits with an error or
 // at exit.
+//
+// cancelFunc will only be run once.
 func OnError(perr *error, fn func()) func() {
-	handle := Register(fn)
+	var once sync.Once
+	onceFn := func() {
+		once.Do(fn)
+	}
+	handle := Register(onceFn)
 	return func() {
 		defer Unregister(handle)
 		if *perr != nil {
-			fn()
+			onceFn()
 		}
 	}
 

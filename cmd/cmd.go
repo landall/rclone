@@ -73,11 +73,13 @@ func ShowVersion() {
 
 	linking, tagString := buildinfo.GetLinkingAndTags()
 
+	arch := buildinfo.GetArch()
+
 	fmt.Printf("rclone %s\n", fs.Version)
 	fmt.Printf("- os/version: %s\n", osVersion)
 	fmt.Printf("- os/kernel: %s\n", osKernel)
 	fmt.Printf("- os/type: %s\n", runtime.GOOS)
-	fmt.Printf("- os/arch: %s\n", runtime.GOARCH)
+	fmt.Printf("- os/arch: %s\n", arch)
 	fmt.Printf("- go/version: %s\n", runtime.Version())
 	fmt.Printf("- go/linking: %s\n", linking)
 	fmt.Printf("- go/tags: %s\n", tagString)
@@ -117,7 +119,7 @@ func newFsFileAddFilter(remote string) (fs.Fs, string) {
 	f, fileName := NewFsFile(remote)
 	if fileName != "" {
 		if !fi.InActive() {
-			err := fmt.Errorf("Can't limit to single files when using filters: %v", remote)
+			err := fmt.Errorf("can't limit to single files when using filters: %v", remote)
 			err = fs.CountError(err)
 			log.Fatalf(err.Error())
 		}
@@ -273,7 +275,7 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 			break
 		}
 		if retryAfter := accounting.GlobalStats().RetryAfter(); !retryAfter.IsZero() {
-			d := retryAfter.Sub(time.Now())
+			d := time.Until(retryAfter)
 			if d > 0 {
 				fs.Logf(nil, "Received retry after error - sleeping until %s (%v)", retryAfter.Format(time.RFC3339Nano), d)
 				time.Sleep(d)
@@ -319,6 +321,12 @@ func Run(Retry bool, showStats bool, cmd *cobra.Command, f func() error) {
 		if err != nil {
 			fs.Errorf(nil, "Failed to list open files: %v", err)
 		}
+	}
+
+	// clear cache and shutdown backends
+	cache.Clear()
+	if lastErr := accounting.GlobalStats().GetLastError(); cmdErr == nil {
+		cmdErr = lastErr
 	}
 
 	// Log the final error message and exit
@@ -393,9 +401,15 @@ func initConfig() {
 	// Start accounting
 	accounting.Start(ctx)
 
-	// Hide console window
+	// Configure console
 	if ci.NoConsole {
+		// Hide the console window
 		terminal.HideConsole()
+	} else {
+		// Enable color support on stdout if possible.
+		// This enables virtual terminal processing on Windows 10,
+		// adding native support for ANSI/VT100 escape sequences.
+		terminal.EnableColorsStdout()
 	}
 
 	// Load filters
@@ -458,7 +472,7 @@ func initConfig() {
 		})
 	}
 
-	if m, _ := regexp.MatchString("^(bits|bytes)$", *dataRateUnit); m == false {
+	if m, _ := regexp.MatchString("^(bits|bytes)$", *dataRateUnit); !m {
 		fs.Errorf(nil, "Invalid unit passed to --stats-unit. Defaulting to bytes.")
 		ci.DataRateUnit = "bytes"
 	} else {

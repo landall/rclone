@@ -16,6 +16,10 @@ Checks the files in the source and destination match.  It compares
 sizes and hashes (MD5 or SHA1) and logs a report of files that don't
 match.  It doesn't alter the source or destination.
 
+For the [crypt](/crypt/) remote there is a dedicated command,
+[cryptcheck](/commands/rclone_cryptcheck/), that are able to check
+the checksums of the encrypted files.
+
 If you supply the `--size-only` flag, it will only compare the sizes not
 the hashes as well.  Use this for a quick check.
 
@@ -47,6 +51,9 @@ you what happened to it. These are reminiscent of diff files.
 - `+ path` means path was missing on the destination, so only in the source
 - `* path` means path was present in source and destination but different.
 - `! path` means there was an error reading or hashing the source or dest.
+
+The default number of parallel checks is 8. See the [--checkers=N](/docs/#checkers-n)
+option for more information.
 
 
 ```

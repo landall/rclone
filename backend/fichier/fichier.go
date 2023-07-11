@@ -1,3 +1,4 @@
+// Package fichier provides an interface to the 1Fichier storage system.
 package fichier
 
 import (
@@ -37,8 +38,9 @@ func init() {
 		Description: "1Fichier",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
-			Help: "Your API Key, get it from https://1fichier.com/console/params.pl.",
-			Name: "api_key",
+			Help:      "Your API Key, get it from https://1fichier.com/console/params.pl.",
+			Name:      "api_key",
+			Sensitive: true,
 		}, {
 			Help:     "If you want to download a shared folder, add this parameter.",
 			Name:     "shared_folder",
@@ -53,6 +55,11 @@ func init() {
 			Name:       "folder_password",
 			Advanced:   true,
 			IsPassword: true,
+		}, {
+			Help:     "Set if you wish to use CDN download links.",
+			Name:     "cdn",
+			Default:  false,
+			Advanced: true,
 		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
@@ -88,6 +95,7 @@ type Options struct {
 	SharedFolder   string               `config:"shared_folder"`
 	FilePassword   string               `config:"file_password"`
 	FolderPassword string               `config:"folder_password"`
+	CDN            bool                 `config:"cdn"`
 	Enc            encoder.MultiEncoder `config:"encoding"`
 }
 
@@ -294,7 +302,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 			path, ok := f.dirCache.GetInv(directoryID)
 
 			if !ok {
-				return nil, errors.New("Cannot find dir in dircache")
+				return nil, errors.New("cannot find dir in dircache")
 			}
 
 			return f.newObjectFromFile(ctx, path, file), nil
@@ -332,7 +340,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 // checking to see if there is one already - use Put() for that.
 func (f *Fs) putUnchecked(ctx context.Context, in io.Reader, remote string, size int64, options ...fs.OpenOption) (fs.Object, error) {
 	if size > int64(300e9) {
-		return nil, errors.New("File too big, cant upload")
+		return nil, errors.New("File too big, can't upload")
 	} else if size == 0 {
 		return nil, fs.ErrorCantUploadEmptyFiles
 	}

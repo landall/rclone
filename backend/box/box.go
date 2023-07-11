@@ -17,9 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/rclone/rclone/backend/box/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -45,7 +46,6 @@ import (
 	"github.com/rclone/rclone/lib/rest"
 	"github.com/youmark/pkcs8"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/jws"
 )
 
 const (
@@ -76,6 +76,11 @@ var (
 	}
 )
 
+type boxCustomClaims struct {
+	jwt.RegisteredClaims
+	BoxSubType string `json:"box_sub_type,omitempty"`
+}
+
 // Register with Fs
 func init() {
 	fs.Register(&fs.RegInfo{
@@ -102,16 +107,18 @@ func init() {
 			return nil, nil
 		},
 		Options: append(oauthutil.SharedOptions, []fs.Option{{
-			Name:     "root_folder_id",
-			Help:     "Fill in for rclone to use a non root folder as its starting point.",
-			Default:  "0",
-			Advanced: true,
+			Name:      "root_folder_id",
+			Help:      "Fill in for rclone to use a non root folder as its starting point.",
+			Default:   "0",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name: "box_config_file",
 			Help: "Box App config.json location\n\nLeave blank normally." + env.ShellExpandHelp,
 		}, {
-			Name: "access_token",
-			Help: "Box App Primary Access Token\n\nLeave blank normally.",
+			Name:      "access_token",
+			Help:      "Box App Primary Access Token\n\nLeave blank normally.",
+			Sensitive: true,
 		}, {
 			Name:    "box_sub_type",
 			Default: "user",
@@ -178,12 +185,12 @@ func refreshJWTToken(ctx context.Context, jsonFile string, boxSubType string, na
 	signingHeaders := getSigningHeaders(boxConfig)
 	queryParams := getQueryParams(boxConfig)
 	client := fshttp.NewClient(ctx)
-	err = jwtutil.Config("box", name, claims, signingHeaders, queryParams, privateKey, m, client)
+	err = jwtutil.Config("box", name, tokenURL, *claims, signingHeaders, queryParams, privateKey, m, client)
 	return err
 }
 
 func getBoxConfig(configFile string) (boxConfig *api.ConfigJSON, err error) {
-	file, err := ioutil.ReadFile(configFile)
+	file, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("box: failed to read Box config: %w", err)
 	}
@@ -194,34 +201,29 @@ func getBoxConfig(configFile string) (boxConfig *api.ConfigJSON, err error) {
 	return boxConfig, nil
 }
 
-func getClaims(boxConfig *api.ConfigJSON, boxSubType string) (claims *jws.ClaimSet, err error) {
+func getClaims(boxConfig *api.ConfigJSON, boxSubType string) (claims *boxCustomClaims, err error) {
 	val, err := jwtutil.RandomHex(20)
 	if err != nil {
 		return nil, fmt.Errorf("box: failed to generate random string for jti: %w", err)
 	}
 
-	claims = &jws.ClaimSet{
-		Iss: boxConfig.BoxAppSettings.ClientID,
-		Sub: boxConfig.EnterpriseID,
-		Aud: tokenURL,
-		Exp: time.Now().Add(time.Second * 45).Unix(),
-		PrivateClaims: map[string]interface{}{
-			"box_sub_type": boxSubType,
-			"aud":          tokenURL,
-			"jti":          val,
+	claims = &boxCustomClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        val,
+			Issuer:    boxConfig.BoxAppSettings.ClientID,
+			Subject:   boxConfig.EnterpriseID,
+			Audience:  jwt.ClaimStrings{tokenURL},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Second * 45)),
 		},
+		BoxSubType: boxSubType,
 	}
-
 	return claims, nil
 }
 
-func getSigningHeaders(boxConfig *api.ConfigJSON) *jws.Header {
-	signingHeaders := &jws.Header{
-		Algorithm: "RS256",
-		Typ:       "JWT",
-		KeyID:     boxConfig.BoxAppSettings.AppAuth.PublicKeyID,
+func getSigningHeaders(boxConfig *api.ConfigJSON) map[string]interface{} {
+	signingHeaders := map[string]interface{}{
+		"kid": boxConfig.BoxAppSettings.AppAuth.PublicKeyID,
 	}
-
 	return signingHeaders
 }
 
@@ -266,7 +268,7 @@ type Fs struct {
 	root         string                // the path we are working on
 	opt          Options               // parsed options
 	features     *fs.Features          // optional features
-	srv          *rest.Client          // the connection to the one drive server
+	srv          *rest.Client          // the connection to the server
 	dirCache     *dircache.DirCache    // Map of directory path to directory id
 	pacer        *fs.Pacer             // pacer for API calls
 	tokenRenewer *oauthutil.Renew      // renew the token on expiry
@@ -692,7 +694,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -752,7 +754,7 @@ func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size 
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -792,9 +794,9 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 
 // PutUnchecked the object into the container
 //
-// This will produce an error if the object already exists
+// This will produce an error if the object already exists.
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -877,9 +879,9 @@ func (f *Fs) Precision() time.Duration {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -897,7 +899,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 	srcPath := srcObj.fs.rootSlash() + srcObj.remote
 	dstPath := f.rootSlash() + remote
-	if strings.ToLower(srcPath) == strings.ToLower(dstPath) {
+	if strings.EqualFold(srcPath, dstPath) {
 		return nil, fmt.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 	}
 
@@ -995,9 +997,9 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1235,7 +1237,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1346,9 +1347,9 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
-// The new object may have been created if an error is returned
+// The new object may have been created if an error is returned.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	if o.fs.tokenRenewer != nil {
 		o.fs.tokenRenewer.Start()

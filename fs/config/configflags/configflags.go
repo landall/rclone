@@ -37,6 +37,7 @@ var (
 	uploadHeaders   []string
 	downloadHeaders []string
 	headers         []string
+	metadataSet     []string
 )
 
 // AddFlags adds the non filing system specific flags to the command
@@ -70,6 +71,7 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &deleteDuring, "delete-during", "", false, "When synchronizing, delete files during transfer")
 	flags.BoolVarP(flagSet, &deleteAfter, "delete-after", "", false, "When synchronizing, delete files on destination after transferring (default)")
 	flags.Int64VarP(flagSet, &ci.MaxDelete, "max-delete", "", -1, "When synchronizing, limit the number of deletes")
+	flags.FVarP(flagSet, &ci.MaxDeleteSize, "max-delete-size", "", "When synchronizing, limit the total size of deletes")
 	flags.BoolVarP(flagSet, &ci.TrackRenames, "track-renames", "", ci.TrackRenames, "When synchronizing, track file renames and do a server-side move if possible")
 	flags.StringVarP(flagSet, &ci.TrackRenamesStrategy, "track-renames-strategy", "", ci.TrackRenamesStrategy, "Strategies to use when synchronizing using track-renames hash|modtime|leaf")
 	flags.IntVarP(flagSet, &ci.LowLevelRetries, "low-level-retries", "", ci.LowLevelRetries, "Number of low level retries to do")
@@ -119,16 +121,18 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &ci.ProgressTerminalTitle, "progress-terminal-title", "", ci.ProgressTerminalTitle, "Show progress on the terminal title (requires -P/--progress)")
 	flags.BoolVarP(flagSet, &ci.Cookie, "use-cookies", "", ci.Cookie, "Enable session cookiejar")
 	flags.BoolVarP(flagSet, &ci.UseMmap, "use-mmap", "", ci.UseMmap, "Use mmap allocator (see docs)")
-	flags.StringVarP(flagSet, &ci.CaCert, "ca-cert", "", ci.CaCert, "CA certificate used to verify servers")
+	flags.StringArrayVarP(flagSet, &ci.CaCert, "ca-cert", "", ci.CaCert, "CA certificate used to verify servers")
 	flags.StringVarP(flagSet, &ci.ClientCert, "client-cert", "", ci.ClientCert, "Client SSL certificate (PEM) for mutual TLS auth")
 	flags.StringVarP(flagSet, &ci.ClientKey, "client-key", "", ci.ClientKey, "Client SSL private key (PEM) for mutual TLS auth")
 	flags.FVarP(flagSet, &ci.MultiThreadCutoff, "multi-thread-cutoff", "", "Use multi-thread downloads for files above this size")
 	flags.IntVarP(flagSet, &ci.MultiThreadStreams, "multi-thread-streams", "", ci.MultiThreadStreams, "Max number of streams to use for multi-thread downloads")
+	flags.FVarP(flagSet, &ci.MultiThreadWriteBufferSize, "multi-thread-write-buffer-size", "", "In memory buffer size for writing when in multi-thread mode")
 	flags.BoolVarP(flagSet, &ci.UseJSONLog, "use-json-log", "", ci.UseJSONLog, "Use json log format")
 	flags.StringVarP(flagSet, &ci.OrderBy, "order-by", "", ci.OrderBy, "Instructions on how to order the transfers, e.g. 'size,descending'")
 	flags.StringArrayVarP(flagSet, &uploadHeaders, "header-upload", "", nil, "Set HTTP header for upload transactions")
 	flags.StringArrayVarP(flagSet, &downloadHeaders, "header-download", "", nil, "Set HTTP header for download transactions")
 	flags.StringArrayVarP(flagSet, &headers, "header", "", nil, "Set HTTP header for all transactions")
+	flags.StringArrayVarP(flagSet, &metadataSet, "metadata-set", "", nil, "Add metadata key=value when uploading")
 	flags.BoolVarP(flagSet, &ci.RefreshTimes, "refresh-times", "", ci.RefreshTimes, "Refresh the modtime of remote files")
 	flags.BoolVarP(flagSet, &ci.NoConsole, "no-console", "", ci.NoConsole, "Hide console window (supported on Windows only)")
 	flags.StringVarP(flagSet, &dscp, "dscp", "", "", "Set DSCP value to connections, value or name, e.g. CS1, LE, DF, AF21")
@@ -137,6 +141,12 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &ci.DisableHTTP2, "disable-http2", "", ci.DisableHTTP2, "Disable HTTP/2 in the global transport")
 	flags.BoolVarP(flagSet, &ci.HumanReadable, "human-readable", "", ci.HumanReadable, "Print numbers in a human-readable format, sizes with suffix Ki|Mi|Gi|Ti|Pi")
 	flags.DurationVarP(flagSet, &ci.KvLockTime, "kv-lock-time", "", ci.KvLockTime, "Maximum time to keep key-value database locked by process")
+	flags.BoolVarP(flagSet, &ci.DisableHTTPKeepAlives, "disable-http-keep-alives", "", ci.DisableHTTPKeepAlives, "Disable HTTP keep-alives and use each connection once.")
+	flags.BoolVarP(flagSet, &ci.Metadata, "metadata", "M", ci.Metadata, "If set, preserve metadata when copying objects")
+	flags.BoolVarP(flagSet, &ci.ServerSideAcrossConfigs, "server-side-across-configs", "", ci.ServerSideAcrossConfigs, "Allow server-side operations (e.g. copy) to work across different configs")
+	flags.FVarP(flagSet, &ci.TerminalColorMode, "color", "", "When to show colors (and other ANSI codes) AUTO|NEVER|ALWAYS")
+	flags.FVarP(flagSet, &ci.DefaultTime, "default-time", "", "Time to show if modtime is unknown for files and directories")
+	flags.BoolVarP(flagSet, &ci.Inplace, "inplace", "", ci.Inplace, "Download directly to destination file instead of atomic download to temp/rename")
 }
 
 // ParseHeaders converts the strings passed in via the header flags into HTTPOptions
@@ -269,6 +279,20 @@ func SetFlags(ci *fs.ConfigInfo) {
 	}
 	if len(headers) != 0 {
 		ci.Headers = ParseHeaders(headers)
+	}
+	if len(headers) != 0 {
+		ci.Headers = ParseHeaders(headers)
+	}
+	if len(metadataSet) != 0 {
+		ci.MetadataSet = make(fs.Metadata, len(metadataSet))
+		for _, kv := range metadataSet {
+			equal := strings.IndexRune(kv, '=')
+			if equal < 0 {
+				log.Fatalf("Failed to parse '%s' as metadata key=value.", kv)
+			}
+			ci.MetadataSet[strings.ToLower(kv[:equal])] = kv[equal+1:]
+		}
+		fs.Debugf(nil, "MetadataUpload %v", ci.MetadataSet)
 	}
 	if len(dscp) != 0 {
 		if value, ok := parseDSCP(dscp); ok {
