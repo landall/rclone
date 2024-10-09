@@ -1,5 +1,4 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
 // Package azurefiles provides an interface to Microsoft Azure Files
 package azurefiles
@@ -65,7 +64,7 @@ import (
 const (
 	maxFileSize           = 4 * fs.Tebi
 	defaultChunkSize      = 4 * fs.Mebi
-	storageDefaultBaseURL = "core.windows.net" // FIXME not sure this is correct
+	storageDefaultBaseURL = "file.core.windows.net"
 )
 
 func init() {
@@ -1036,12 +1035,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		if _, createErr := fc.Create(ctx, size, nil); createErr != nil {
 			return fmt.Errorf("update: unable to create file: %w", createErr)
 		}
-	} else {
+	} else if size != o.Size() {
 		// Resize the file if needed
-		if size != o.Size() {
-			if _, resizeErr := fc.Resize(ctx, size, nil); resizeErr != nil {
-				return fmt.Errorf("update: unable to resize while trying to update: %w ", resizeErr)
-			}
+		if _, resizeErr := fc.Resize(ctx, size, nil); resizeErr != nil {
+			return fmt.Errorf("update: unable to resize while trying to update: %w ", resizeErr)
 		}
 	}
 
